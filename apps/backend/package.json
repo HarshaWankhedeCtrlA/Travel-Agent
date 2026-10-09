@@ -1,0 +1,22 @@
+{
+  "name": "@travel-agent/backend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "build": "node --check src/server.js",
+    "test": "node --test",
+    "lint": "node --check src/app.js && node --check src/server.js && node --check src/config/database.js && node --check src/models/trip.js && node --check src/routes/trips.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "dotenv": "^16.4.7",
+    "express": "^5.1.0",
+    "mongoose": "^8.19.1"
+  }
+}
