@@ -17,6 +17,7 @@
     "cors": "^2.8.6",
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
-    "mongoose": "^8.19.1"
+    "mongoose": "^8.19.1",
+    "razorpay": "^2.9.8"
   }
 }

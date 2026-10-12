@@ -41,22 +41,27 @@ function toIATA(city) {
 export async function searchFlights({ origin = "Delhi", destination, departDate, returnDate, travelers = 1 }) {
   const apiKey = process.env.SERPAPI_KEY;
   if (!apiKey) throw new Error("SERPAPI_KEY not set");
+const url = new URL(SERPAPI_URL);
+url.searchParams.set("engine", "google_flights");
+url.searchParams.set("departure_id", toIATA(origin));
+url.searchParams.set("arrival_id", toIATA(destination));
+url.searchParams.set("outbound_date", departDate);
 
-  const url = new URL(SERPAPI_URL);
-  url.searchParams.set("engine", "google_flights");
-  url.searchParams.set("departure_id", toIATA(origin));
-  url.searchParams.set("arrival_id", toIATA(destination));
-  url.searchParams.set("outbound_date", departDate);
-  if (returnDate) {
-    url.searchParams.set("return_date", returnDate);
-  } else {
-    url.searchParams.set("type", "2");
-  }
-  url.searchParams.set("currency", "INR");
-  url.searchParams.set("hl", "en");
-  url.searchParams.set("gl", "in");
-  url.searchParams.set("api_key", apiKey);
+const isValidDate = (d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d);
 
+if (isValidDate(returnDate)) {
+  url.searchParams.set("return_date", returnDate);
+  url.searchParams.set("type", "1");
+} else {
+  url.searchParams.set("type", "2");
+}
+
+url.searchParams.set("currency", "INR");
+url.searchParams.set("hl", "en");
+url.searchParams.set("gl", "in");
+url.searchParams.set("api_key", apiKey);
+
+console.log("[flights] URL:", url.toString());
   const res = await fetch(url);
   if (!res.ok) throw new Error(`SerpAPI ${res.status}`);
 

@@ -4,10 +4,10 @@ import { createPaymentLink, FEE_INR } from "../providers/payment.js";
 export async function initiateFee(trip) {
   if (trip.feePaid) return { alreadyPaid: true, amount: trip.feeAmount };
 
-  const { id, url, amount } = createPaymentLink({
-    tripId: trip._id.toString(),
-    amount: FEE_INR,
-  });
+  const { id, url, amount } = await createPaymentLink({
+  tripId: trip._id.toString(),
+  amount: FEE_INR,
+});
 
   trip.paymentId = id;
   trip.feeAmount = amount;
