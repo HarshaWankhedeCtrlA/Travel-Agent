@@ -4,7 +4,9 @@ import Message from "../models/message.js";
 import * as wa from "../providers/whatsapp.js";
 import { extractBrief } from "../llm/gateway.js";
 import { buildPackages, formatPackageMessage } from "../services/packages.js";
-
+import { buildItinerary, formatDayMessage, formatSummaryMessage } from "../services/itinerary.js";
+import { initiateFee, FEE_INR } from "../services/payments.js";
+import { askMissing } from "../llm/ask.js";
 // Order matters: this is the order the bot asks the questions in.
 const REQUIRED_FIELDS = ["origin", "destination", "departDate", "returnDate", "travelers", "budget"];
 
@@ -49,6 +51,8 @@ export async function handleIncoming({ from, body }) {
       return handleBriefConfirmed(trip, traveler, from, body);
     case "PACKAGES_SENT":
       return handlePackagesSent(trip, traveler, from, body);
+       case "FEE_PAID":
+    return handleFeePaid(trip, traveler, from, body);
     default:
       return handleLaterStage(trip, traveler, from);
   }
@@ -79,7 +83,25 @@ async function handleIntake(trip, traveler, from, body) {
   const extracted = await tryExtract(body, { expect, brief: trip.brief });
   if (!extracted) return replyLlmDown(trip, traveler, from);
 
+  // Regex backup: "X to Y" / "X se Y" pattern for origin/destination
+  const routeMatch = body.match(/\b([A-Za-z]+)\s+(?:to|se)\s+([A-Za-z]+)\b/i);
+  if (routeMatch) {
+    const [, a, b] = routeMatch;
+    const known = [
+      "delhi", "mumbai", "pune", "goa", "bangalore", "bengaluru",
+      "chennai", "hyderabad", "kolkata", "jaipur", "manali",
+      "shimla", "udaipur", "kochi", "kerala", "bali", "dubai",
+    ];
+    if (known.includes(a.toLowerCase()) && !extracted.origin) {
+      extracted.origin = a[0].toUpperCase() + a.slice(1).toLowerCase();
+    }
+    if (known.includes(b.toLowerCase()) && !extracted.destination) {
+      extracted.destination = b[0].toUpperCase() + b.slice(1).toLowerCase();
+    }
+  }
+
   trip.brief = mergeBrief(trip.brief, extracted);
+  trip.brief._lastUserMessage = body;    // ← for LLM context
   trip.markModified("brief");
 
   const missing = REQUIRED_FIELDS.filter((f) => !trip.brief[f]);
@@ -99,8 +121,8 @@ async function handleIntake(trip, traveler, from, body) {
   }
 
   const nextField = missing[0];
-  const question = questionFor(nextField, trip.brief);
-  trip.brief._asked = nextField;
+const question = await askMissing(nextField, trip.brief);
+trip.brief._asked = nextField;
   trip.markModified("brief");
   await trip.save();
   await sendAndLog(from, traveler, trip, question);
@@ -115,14 +137,14 @@ async function handleBriefConfirmed(trip, traveler, from, body) {
 
     if (Object.keys(extracted).length > 0) {
       trip.brief = mergeBrief(trip.brief, extracted);
+      trip.brief._lastUserMessage = body;    // ← for LLM context
       trip.markModified("brief");
-
       const missing = REQUIRED_FIELDS.filter((f) => !trip.brief[f]);
       if (missing.length > 0) {
         trip.status = "DRAFT";
         trip.brief._asked = missing[0];
         await trip.save();
-        const question = questionFor(missing[0], trip.brief);
+        const question = await askMissing(missing[0], trip.brief);
         await sendAndLog(from, traveler, trip, question);
         return { reply: question, tripId: trip._id, status: trip.status };
       }
@@ -206,10 +228,12 @@ async function handleBriefConfirmed(trip, traveler, from, body) {
   };
 }
 
-// ─────────────────────────────────────────────────────────────
 async function handlePackagesSent(trip, traveler, from, body) {
   const n = body.trim().toLowerCase();
-
+if (trip.feePaid) {
+  // Already paid → build itinerary
+  return handleFeePaid(trip, traveler, from, body);
+}
   const picked =
     n.includes("cheap") ? "cheapest"
     : n.includes("comfort") || n.includes("premium") ? "comfortable"
@@ -230,19 +254,116 @@ async function handlePackagesSent(trip, traveler, from, body) {
   }
 
   trip.chosenTier = picked;
-  trip.status = "ITINERARY_SENT";
   await trip.save();
 
-  const reply =
-    `Great choice! You picked ${chosen.label}.\n\n` +
-    `✈️ ${chosen.flight.airline} ${chosen.flight.flightNumber}\n` +
-    `🏨 ${chosen.hotel.name}\n` +
-    `💰 Total: ₹${chosen.totalPrice.toLocaleString("en-IN")}\n\n` +
-    `Next: I'll build a day-by-day itinerary. (Coming soon.)\n\n` +
-    `Want to plan another trip? Type "new trip".`;
+  // If fee not paid yet → ask for payment first
+  if (!trip.feePaid) {
+    const { url, amount } = await initiateFee(trip);
 
-  await sendAndLog(from, traveler, trip, reply);
-  return { reply, tripId: trip._id, status: trip.status };
+    const payMsg =
+      `Great choice! You picked ${chosen.label}.\n\n` +
+      `✈️ ${chosen.flight.airline} ${chosen.flight.flightNumber}\n` +
+      `🏨 ${chosen.hotel.name}\n` +
+      `💰 Total: ₹${chosen.totalPrice.toLocaleString("en-IN")}\n\n` +
+      `━━━━━━━━━━━━━━━━━━━━\n` +
+      `To unlock your day-by-day itinerary + price watching,\n` +
+      `pay the one-time fee:\n\n` +
+      `💳 ₹${amount} (UPI / Card)\n` +
+      `👉 ${url}\n\n` +
+      `After payment, reply "paid" and I'll build your itinerary.`;
+
+    await sendAndLog(from, traveler, trip, payMsg);
+    return {
+      reply: payMsg,
+      tripId: trip._id,
+      status: trip.status,
+      paymentUrl: url,
+    };
+  }
+
+  // Fee paid → build itinerary
+  await sendAndLog(from, traveler, trip, `📍 Building your ${trip.brief.destination} itinerary...`);
+
+  let itinerary;
+  try {
+    itinerary = await buildItinerary(trip);
+  } catch (err) {
+    console.error("[itinerary] failed:", err);
+    const reply = `Sorry, I couldn't build the itinerary right now. Try again in a minute.`;
+    await sendAndLog(from, traveler, trip, reply);
+    return { reply, tripId: trip._id, status: trip.status };
+  }
+
+  trip.itinerary = itinerary;
+  trip.status = "ITINERARY_SENT";
+  trip.markModified("itinerary");
+  await trip.save();
+
+  for (const day of itinerary.days) {
+    const text = formatDayMessage(day, trip.brief);
+    await sendAndLog(from, traveler, trip, text);
+  }
+
+  const summaryMsg = formatSummaryMessage(
+    itinerary.summary,
+    itinerary.packing,
+    itinerary.weather,
+    itinerary.documents
+  );
+  await sendAndLog(from, traveler, trip, summaryMsg);
+
+  const endMsg = `Want to change anything? Type "new trip" to plan another.`;
+  await sendAndLog(from, traveler, trip, endMsg);
+
+  return {
+    reply: "Itinerary sent",
+    tripId: trip._id,
+    status: trip.status,
+    days: itinerary.days.length,
+  };
+}
+
+async function handleFeePaid(trip, traveler, from, body) {
+  // Build itinerary immediately
+  await sendAndLog(from, traveler, trip, `📍 Building your ${trip.brief.destination} itinerary...`);
+
+  let itinerary;
+  try {
+    itinerary = await buildItinerary(trip);
+  } catch (err) {
+    console.error("[itinerary] failed:", err);
+    const reply = `Sorry, I couldn't build the itinerary right now. Try again in a minute.`;
+    await sendAndLog(from, traveler, trip, reply);
+    return { reply, tripId: trip._id, status: trip.status };
+  }
+
+  trip.itinerary = itinerary;
+  trip.status = "ITINERARY_SENT";
+  trip.markModified("itinerary");
+  await trip.save();
+
+  for (const day of itinerary.days) {
+    const text = formatDayMessage(day, trip.brief);
+    await sendAndLog(from, traveler, trip, text);
+  }
+
+  const summaryMsg = formatSummaryMessage(
+    itinerary.summary,
+    itinerary.packing,
+    itinerary.weather,
+    itinerary.documents
+  );
+  await sendAndLog(from, traveler, trip, summaryMsg);
+
+  const endMsg = `Want to change anything? Type "new trip" to plan another.`;
+  await sendAndLog(from, traveler, trip, endMsg);
+
+  return {
+    reply: "Itinerary sent",
+    tripId: trip._id,
+    status: trip.status,
+    days: itinerary.days.length,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────

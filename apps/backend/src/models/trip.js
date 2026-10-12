@@ -31,6 +31,10 @@ const tripSchema = new mongoose.Schema(
     packages: { type: [mongoose.Schema.Types.Mixed], default: [] },
 chosenTier: { type: String },
 itinerary: { type: mongoose.Schema.Types.Mixed, default: null },
+feePaid: { type: Boolean, default: false },
+feeAmount: { type: Number },
+paymentId: { type: String },
+paidAt: { type: Date },
   },
   { timestamps: true }
 );

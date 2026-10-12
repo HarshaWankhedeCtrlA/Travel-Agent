@@ -3,11 +3,12 @@ import mongoose from "mongoose";
 import cors from "cors";
 import tripsRouter from "./routes/trips.js";
 import webhookRouter from "./routes/webhook.js";
-
+import paymentRouter from "./routes/payment.js";
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
 
 app.get("/api/health", (_req, res) => {
   res.json({
@@ -18,6 +19,7 @@ app.get("/api/health", (_req, res) => {
 
 app.use("/api/trips", tripsRouter);
 app.use("/api/webhook", webhookRouter);
+app.use("/api/payment", paymentRouter);
 
 app.use((err, _req, res, _next) => {
   if (err instanceof mongoose.Error.ValidationError || err instanceof mongoose.Error.CastError) {

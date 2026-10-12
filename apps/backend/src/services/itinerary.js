@@ -1,12 +1,11 @@
 import { searchPlaces } from "../providers/places.js";
+import { getWeather } from "../providers/weather.js";
 import { nightsBetween } from "./budget.js";
 
-// Time slot rules (approximate)
-const SLOTS = {
-  morning:   { start: "09:00", end: "13:00", minutes: 240 },
-  afternoon: { start: "14:00", end: "18:00", minutes: 240 },
-  evening:   { start: "19:00", end: "22:00", minutes: 180 },
-};
+const COASTAL_CITIES = [
+  "goa", "mumbai", "chennai", "kerala", "andaman", "bali",
+  "phuket", "pondicherry", "kovalam", "varkala", "gokarna",
+];
 
 export async function buildItinerary(trip) {
   const brief = trip.brief;
@@ -14,19 +13,53 @@ export async function buildItinerary(trip) {
   if (!chosen) throw new Error("No chosen package");
 
   const nights = nightsBetween(brief.departDate, brief.returnDate);
-  const days = nights + 1; // arrival day + nights
+  const days = nights + 1;
 
-  const places = await searchPlaces({ city: brief.destination });
+  // Fetch real data in parallel
+  const [places, weather] = await Promise.all([
+    searchPlaces({ city: brief.destination }).catch(() => []),
+    getWeather({
+      city: brief.destination,
+      departDate: brief.departDate,
+      returnDate: brief.returnDate,
+    }).catch(() => null),
+  ]);
 
-  const beaches = places.filter((p) => p.category === "beach");
+  const isCoastal = COASTAL_CITIES.some((c) =>
+    (brief.destination || "").toLowerCase().includes(c)
+  );
+
+  const beaches = isCoastal ? places.filter((p) => p.category === "beach") : [];
   const forts = places.filter((p) => p.category === "fort");
   const temples = places.filter((p) => p.category === "temple");
   const markets = places.filter((p) => p.category === "market");
   const museums = places.filter((p) => p.category === "museum");
   const nature = places.filter((p) => p.category === "nature");
   const restaurants = places.filter((p) => p.category === "restaurant");
+  const general = places.filter((p) => p.category === "attraction" || p.category === "viewpoint");
+
+  // Deduped pool
+  const seen = new Set();
+  const activityPool = [];
+  for (const p of [...forts, ...temples, ...markets, ...nature, ...museums, ...general]) {
+    if (p.name && !seen.has(p.name)) {
+      activityPool.push(p);
+      seen.add(p.name);
+    }
+  }
+
+  const diningPool = [];
+  const seenDining = new Set();
+  for (const p of restaurants) {
+    if (p.name && !seenDining.has(p.name)) {
+      diningPool.push(p);
+      seenDining.add(p.name);
+    }
+  }
 
   const itinerary = [];
+  let activityIdx = 0;
+  let diningIdx = 0;
 
   for (let i = 0; i < days; i++) {
     const date = addDays(brief.departDate, i);
@@ -40,62 +73,61 @@ export async function buildItinerary(trip) {
       morning: [],
       afternoon: [],
       evening: [],
-      meals: [],
       transfer: null,
       notes: [],
     };
 
     if (isArrival) {
-      day.notes.push(`Arrive at ${brief.destination} airport`);
-      day.transfer = `Airport → ${chosen.hotel.name} (30 min, ₹600)`;
-      day.afternoon.push(beaches[i % beaches.length]?.name || "Relax at hotel");
-      day.evening.push(restaurants[i % restaurants.length]?.name || "Dinner at hotel");
+      day.notes.push(`Arrive at ${brief.destination}`);
+      day.transfer = `Airport → ${chosen.hotel.name}`;
+      const first = beaches[0] || activityPool[activityIdx++];
+      if (first) day.afternoon.push(first.name);
+      const dinner = diningPool[diningIdx++];
+      if (dinner) day.evening.push(dinner.name);
     } else if (isDeparture) {
+      const departHour = chosen.flight.departAt
+        ? new Date(chosen.flight.departAt).getHours()
+        : 11;
       day.morning.push("Breakfast at hotel");
-      day.notes.push(`Check out by 11:00 am`);
+      if (departHour < 9) {
+        day.notes.push("Check out by 5:00 am for early flight");
+        day.notes.push("⚠️ Book airport cab the night before");
+      } else {
+        day.notes.push("Check out by 11:00 am");
+      }
       day.notes.push(`Flight ${chosen.flight.flightNumber} departs ${fmtTime(chosen.flight.departAt)}`);
     } else {
-      const siteIdx = (i - 1) % 4;
-      if (siteIdx === 0) {
-        day.morning.push(forts[0]?.name || "Local fort");
-        day.afternoon.push(beaches[0]?.name || "Beach time");
-        day.evening.push("Sunset at Chapora Fort");
-      } else if (siteIdx === 1) {
-        day.morning.push(temples[0]?.name || "Local temple");
-        day.afternoon.push(markets[0]?.name || "Local market");
-        day.evening.push(restaurants[1]?.name || "Dinner out");
-      } else if (siteIdx === 2) {
-        day.morning.push(nature[0]?.name || "Nature spot");
-        day.afternoon.push(beaches[1]?.name || "Beach time");
-        day.evening.push("Relax at hotel");
-      } else {
-        day.morning.push(museums[0]?.name || "Local museum");
-        day.afternoon.push(beaches[2]?.name || "Beach time");
-        day.evening.push(restaurants[2]?.name || "Dinner out");
-      }
+      const m = activityPool[activityIdx++];
+      const a = beaches[0] || activityPool[activityIdx++];
+      const e = diningPool[diningIdx++];
+      if (m) day.morning.push(m.name);
+      if (a) day.afternoon.push(a.name);
+      if (e) day.evening.push(e.name);
     }
 
-    // Meal cost band
-    const mealCost = chosen.totalPrice > brief.budget ? "₹1,500-2,000" : "₹800-1,200";
-    day.meals.push({ label: "Breakfast", cost: chosen.hotel.breakfastIncluded ? "included" : "₹300-500" });
-    day.meals.push({ label: "Lunch", cost: "₹400-600" });
-    day.meals.push({ label: "Dinner", cost: mealCost });
-
+    day.morning = day.morning.filter(Boolean);
+    day.afternoon = day.afternoon.filter(Boolean);
+    day.evening = day.evening.filter(Boolean);
     itinerary.push(day);
   }
 
   return {
     days: itinerary,
     summary: buildSummary(trip, chosen, itinerary),
-    packing: buildPacking(brief),
-    weather: "22–30°C, mostly sunny with occasional showers",
+    packing: buildPacking(brief, weather),
+    weather: weather
+      ? `${weather.location}: ${weather.minTemp}–${weather.maxTemp}°C, ${weather.summary}` +
+        (weather.rainMm > 0 ? `, ~${weather.rainMm}mm rain` : "")
+      : "Weather data unavailable",
     documents: ["Government ID", "Flight tickets", "Hotel confirmation", "Travel insurance (optional)"],
   };
 }
 
 function buildSummary(trip, chosen, itinerary) {
   const brief = trip.brief;
-  const spendEstimate = chosen.totalPrice + itinerary.length * 1500; // +meals
+  const mealCost = itinerary.length * 1500;
+  const activityCost = itinerary.length * 800;
+  const spendEstimate = chosen.totalPrice + mealCost + activityCost;
   const overBudget = spendEstimate - brief.budget;
   return {
     flight: `${chosen.flight.airline} ${chosen.flight.flightNumber}`,
@@ -107,42 +139,49 @@ function buildSummary(trip, chosen, itinerary) {
   };
 }
 
-function buildPacking(brief) {
-  const base = ["Sunscreen SPF50", "Swimwear", "Flip-flops", "Light cottons", "Sunglasses", "Hat"];
+function buildPacking(brief, weather) {
   const dest = (brief.destination || "").toLowerCase();
-  if (dest.includes("manali") || dest.includes("shimla") || dest.includes("leh")) {
-    return ["Warm jacket", "Thermals", "Trekking shoes", "Gloves", "Beanie", "Moisturizer"];
+  if (["manali", "shimla", "leh", "srinagar", "auli", "darjeeling"].some((d) => dest.includes(d))) {
+    return ["Warm jacket", "Thermals", "Trekking shoes", "Gloves", "Beanie", "Moisturizer", "Sunglasses"];
   }
-  return base;
+  // Use real weather if cold temps are forecast
+  if (weather && weather.minTemp != null && weather.minTemp < 15) {
+    return ["Light jacket", "Layers", "Comfortable shoes", "Sunglasses", "Basic medicines"];
+  }
+  if (weather && weather.rainMm > 20) {
+    return ["Umbrella", "Waterproof shoes", "Light layers", "Sunglasses", "Basic medicines"];
+  }
+  return ["Comfortable shoes", "Light layers", "Sunglasses", "Basic medicines", "Power bank", "Reusable bottle"];
 }
 
-export function formatDayMessage(day, brief) {
+export function formatDayMessage(day) {
   const lines = [`Day ${day.dayNumber} — ${fmtDate(day.date)} (${day.label})`];
-  if (day.morning.length)   lines.push(`🌅 Morning: ${day.morning.join(", ")}`);
+  if (day.morning.length) lines.push(`🌅 Morning: ${day.morning.join(", ")}`);
   if (day.afternoon.length) lines.push(`☀️ Afternoon: ${day.afternoon.join(", ")}`);
-  if (day.evening.length)   lines.push(`🌙 Evening: ${day.evening.join(", ")}`);
-  if (day.transfer)         lines.push(`🚕 ${day.transfer}`);
-  if (day.notes.length)     lines.push(day.notes.map((n) => `• ${n}`).join("\n"));
+  if (day.evening.length) lines.push(`🌙 Evening: ${day.evening.join(", ")}`);
+  if (day.transfer) lines.push(`🚕 ${day.transfer}`);
+  if (day.notes.length) lines.push(day.notes.map((n) => `• ${n}`).join("\n"));
   return lines.join("\n");
 }
 
 export function formatSummaryMessage(summary, packing, weather, documents) {
-  const over = summary.overBudget > 0
-    ? `\n⚠️ ₹${summary.overBudget.toLocaleString("en-IN")} over your ₹${summary.budget.toLocaleString("en-IN")} budget`
-    : `\n✅ Within your ₹${summary.budget.toLocaleString("en-IN")} budget`;
+  const over =
+    summary.overBudget > 0
+      ? `\n⚠️ ₹${summary.overBudget.toLocaleString("en-IN")} over your ₹${summary.budget.toLocaleString("en-IN")} budget`
+      : `\n✅ Within your ₹${summary.budget.toLocaleString("en-IN")} budget`;
   return (
     `📋 Trip Summary\n\n` +
     `✈️ ${summary.flight}\n` +
     `🏨 ${summary.hotel}\n` +
     `💰 Package: ₹${summary.packagePrice.toLocaleString("en-IN")}\n` +
-    `💸 Est. total (with meals): ₹${summary.spendEstimate.toLocaleString("en-IN")}${over}\n\n` +
+    `💸 Est. total (with meals + activities): ₹${summary.spendEstimate.toLocaleString("en-IN")}${over}\n\n` +
     `🌡️ Weather: ${weather}\n\n` +
     `📋 Packing: ${packing.join(", ")}\n\n` +
     `📄 Documents: ${documents.join(", ")}`
   );
 }
 
-// ─── Helpers ─────────────────────────────────────────────────
+// ─── Helpers ─────────────────────────────────────────────
 function addDays(iso, n) {
   const d = new Date(iso);
   d.setDate(d.getDate() + n);
@@ -155,6 +194,7 @@ function fmtDate(iso) {
 }
 
 function fmtTime(iso) {
+  if (!iso) return "TBD";
   const d = new Date(iso);
   return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
 }

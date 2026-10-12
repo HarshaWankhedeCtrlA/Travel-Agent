@@ -60,10 +60,18 @@ export async function searchFlights({ origin = "Delhi", destination, departDate,
   const res = await fetch(url);
   if (!res.ok) throw new Error(`SerpAPI ${res.status}`);
 
-  const data = await res.json();
-  if (data.error) throw new Error(`SerpAPI: ${data.error}`);
+const data = await res.json();
 
-  const raw = [...(data.best_flights || []), ...(data.other_flights || [])].slice(0, 8);
+if (data.error) {
+  const errMsg = String(data.error).toLowerCase();
+  // "no results" is a valid response, not an error — return empty
+  if (errMsg.includes("hasn't returned any results") || errMsg.includes("no results")) {
+    return [];
+  }
+  throw new Error(`SerpAPI: ${data.error}`);
+}
+
+const raw = [...(data.best_flights || []), ...(data.other_flights || [])].slice(0, 8);
 
   return raw
     .filter((f) => f.price && f.price > 0)
@@ -73,7 +81,10 @@ export async function searchFlights({ origin = "Delhi", destination, departDate,
       const first = legs[0] || {};
       const last = legs[legs.length - 1] || {};
       const stops = Math.max(0, legs.length - 1);
-
+ const bookingUrl =
+      f.booking_token
+        ? `https://www.google.com/travel/flights/booking?hl=en&gl=in&token=${encodeURIComponent(f.booking_token)}`
+        : `https://www.google.com/travel/flights?hl=en&gl=in&q=${encodeURIComponent(`flights from ${origin} to ${destination} on ${departDate}`)}`;
       return {
         id: `fl_${Date.now()}_${i}`,
         airline: first.airline || "Unknown",
@@ -90,6 +101,8 @@ export async function searchFlights({ origin = "Delhi", destination, departDate,
         baggageIncluded: true,
         refundable: false,
         reliability: 0.85,
+        bookingUrl,
+        
       };
     });
 }

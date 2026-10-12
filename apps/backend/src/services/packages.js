@@ -38,21 +38,29 @@ export async function buildPackages(trip) {
   const cheapHotel = [...hotels].sort((a, b) => a.pricePerNight - b.pricePerNight)[0];
 
   const bestFlight = [...flights].sort((a, b) => scoreFlight(a) - scoreFlight(b))[0];
-  const bestHotel = [...hotels].sort((a, b) => scoreHotel(b, nights) - scoreHotel(a, nights))[0];
+ const bestHotel =
+  [...hotels]
+    .filter((h) => h.id !== cheapHotel.id)              // ← distinct from cheapest
+    .sort((a, b) => scoreHotel(b, nights) - scoreHotel(a, nights))[0] ||
+  [...hotels].sort((a, b) => scoreHotel(b, nights) - scoreHotel(a, nights))[0];
+ const comfFlight =
+  [...flights]
+    .filter((f) => f.id !== cheapFlight.id && f.id !== bestFlight.id)
+    .filter((f) => f.stops === 0)
+    .sort((a, b) => b.reliability - a.reliability)[0] ||
+  [...flights]
+    .filter((f) => f.id !== cheapFlight.id)
+    .sort((a, b) => b.reliability - a.reliability)[0] ||
+  [...flights].sort((a, b) => b.reliability - a.reliability)[0];
 
-  const comfFlight =
-    [...flights]
-      .filter((f) => f.totalPrice <= brief.budget * 0.6)
-      .filter((f) => f.stops === 0)
-      .sort((a, b) => b.reliability - a.reliability)[0] ||
-    [...flights].sort((a, b) => b.reliability - a.reliability)[0];
-
-  const comfHotel =
-    [...hotels]
-      .filter((h) => h.pricePerNight * nights <= brief.budget * 1.5)
-      .sort((a, b) => b.starRating - a.starRating || b.guestRating - a.guestRating)[0] ||
-    [...hotels].sort((a, b) => b.starRating - a.starRating || b.guestRating - a.guestRating)[0];
-
+const comfHotel =
+  [...hotels]
+    .filter((h) => h.id !== cheapHotel.id && h.id !== bestHotel.id)
+    .sort((a, b) => b.starRating - a.starRating || b.guestRating - a.guestRating)[0] ||
+  [...hotels]
+    .filter((h) => h.id !== cheapHotel.id)
+    .sort((a, b) => b.starRating - a.starRating)[0] ||
+  [...hotels].sort((a, b) => b.starRating - a.starRating)[0];
   const tiers = [
     {
       tier: "cheapest",
@@ -139,13 +147,15 @@ export function formatPackageMessage(tier, brief) {
     `    Depart ${fmtTime(f.departAt)} → Arrive ${fmtTime(f.arriveAt)}\n\n` +
     `🏨 ${h.name} • ${h.starRating}★ • ${h.guestRating.toFixed(1)}/5 (${h.reviewCount} reviews)\n` +
     `    ₹${h.pricePerNight.toLocaleString("en-IN")}/night × ${nights} nights = ₹${tier.hotelPrice.toLocaleString("en-IN")}\n` +
-    `    ${h.distanceToCenterKm} km from center${h.breakfastIncluded ? " • Breakfast included" : ""}\n\n` +
+    `    ${h.distanceToCenterKm ?? "?"} km from center${h.breakfastIncluded ? " • Breakfast included" : ""}\n\n` +
     `💡 ${tier.reasoning}\n` +
     `⚠️ ${tier.drawback}\n` +
-    `📊 ${tier.budgetFit}% of your ₹${brief.budget.toLocaleString("en-IN")} budget${tier.overBudget ? " (over)" : ""}`
+    `📊 ${tier.budgetFit}% of your ₹${brief.budget.toLocaleString("en-IN")} budget${tier.overBudget ? " (over)" : ""}\n\n` +
+    `🔗 Book this package:\n` +
+    `✈️ Flight: ${f.bookingUrl || "Ask us"}\n` +
+    `🏨 Hotel: ${h.bookingUrl || "Ask us"}`
   );
 }
-
 function fmtTime(iso) {
   const d = new Date(iso);
   return d.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
