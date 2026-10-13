@@ -4,10 +4,11 @@ import cors from "cors";
 import tripsRouter from "./routes/trips.js";
 import webhookRouter from "./routes/webhook.js";
 import paymentRouter from "./routes/payment.js";
+import whatsappRouter from "./routes/whatsapp.js";
 const app = express();
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ verify: (req, _res, buf) => { req.rawBody = buf; } }));
 app.use(express.urlencoded({ extended: true }));
 
 app.get("/api/health", (_req, res) => {
@@ -20,6 +21,7 @@ app.get("/api/health", (_req, res) => {
 app.use("/api/trips", tripsRouter);
 app.use("/api/webhook", webhookRouter);
 app.use("/api/payment", paymentRouter);
+app.use("/api/whatsapp", whatsappRouter);
 
 app.use((err, _req, res, _next) => {
   if (err instanceof mongoose.Error.ValidationError || err instanceof mongoose.Error.CastError) {

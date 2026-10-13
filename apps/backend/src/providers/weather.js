@@ -1,26 +1,40 @@
 // Real weather via Open-Meteo — free, no API key.
 // Uses forecast for near dates, historical archive for far dates.
 
+const DAY = 86400000;
+
 export async function getWeather({ city, departDate, returnDate }) {
   try {
     const geoRes = await fetch(
-      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=1&language=en&format=json`
+      `https://geocoding-api.open-meteo.com/v1/search?name=${encodeURIComponent(city)}&count=10&language=en&format=json`
     );
     const geo = await geoRes.json();
-    if (!geo.results?.length) return null;
+    const place = pickPlace(geo.results);
+    if (!place) return null;
 
-    const { latitude, longitude, name, country } = geo.results[0];
+    const { latitude, longitude, name, country } = place;
 
-    const daysUntilTrip = Math.floor((new Date(departDate) - new Date()) / 86400000);
+    const now = new Date();
+    const daysUntilTrip = Math.floor((new Date(departDate) - now) / DAY);
+    const daysUntilReturn = Math.floor((new Date(returnDate || departDate) - now) / DAY);
 
-    if (daysUntilTrip >= 0 && daysUntilTrip <= 14) {
+    // The forecast reaches about 16 days ahead, and the whole trip must fit inside it
+    if (daysUntilTrip >= 0 && daysUntilReturn <= 15) {
       return await getForecast({ latitude, longitude, name, country, departDate, returnDate });
     }
-    return await getArchiveWeather({ latitude, longitude, name, country, departDate });
+    return await getArchiveWeather({ latitude, longitude, name, country, departDate, returnDate });
   } catch (err) {
     console.error("[weather] failed:", err.message);
     return null;
   }
+}
+
+// A search for "Goa" returns several places with that name. The biggest one is
+// almost always the one the traveler means (the Indian state, not a small town
+// on another continent).
+function pickPlace(results) {
+  if (!Array.isArray(results) || results.length === 0) return null;
+  return [...results].sort((a, b) => (b.population || 0) - (a.population || 0))[0];
 }
 
 async function getForecast({ latitude, longitude, name, country, departDate, returnDate }) {
@@ -30,7 +44,7 @@ async function getForecast({ latitude, longitude, name, country, departDate, ret
   url.searchParams.set("daily", "temperature_2m_max,temperature_2m_min,precipitation_sum,weathercode");
   url.searchParams.set("timezone", "Asia/Kolkata");
   url.searchParams.set("start_date", departDate);
-  url.searchParams.set("end_date", returnDate);
+  url.searchParams.set("end_date", returnDate || departDate);
 
   const res = await fetch(url);
   const data = await res.json();
@@ -39,21 +53,21 @@ async function getForecast({ latitude, longitude, name, country, departDate, ret
   const maxArr = data.daily.temperature_2m_max.filter(Number.isFinite);
   const minArr = data.daily.temperature_2m_min.filter(Number.isFinite);
   const rainArr = (data.daily.precipitation_sum || []).filter(Number.isFinite);
+  if (!maxArr.length || !minArr.length) return null;
 
   return {
     location: `${name}, ${country}`,
     minTemp: Math.round(minArr.reduce((a, b) => a + b, 0) / minArr.length),
     maxTemp: Math.round(maxArr.reduce((a, b) => a + b, 0) / maxArr.length),
-    rainMm: rainArr.length
-      ? Math.round(rainArr.reduce((a, b) => a + b, 0) * 10) / 10
-      : 0,
-    summary: describeWeather(data.daily.weathercode?.[0] || 0),
+    // Total rain over the whole trip
+    rainMm: rainArr.length ? Math.round(rainArr.reduce((a, b) => a + b, 0) * 10) / 10 : 0,
+    summary: describeWeather(mostCommon(data.daily.weathercode)),
     source: "open-meteo forecast",
     type: "forecast",
   };
 }
 
-async function getArchiveWeather({ latitude, longitude, name, country, departDate }) {
+async function getArchiveWeather({ latitude, longitude, name, country, departDate, returnDate }) {
   const tripDate = new Date(departDate);
   const lastYear = new Date().getFullYear() - 1;
   const month = String(tripDate.getMonth() + 1).padStart(2, "0");
@@ -81,17 +95,34 @@ async function getArchiveWeather({ latitude, longitude, name, country, departDat
 
   if (!maxArr.length || !minArr.length) return null;
 
+  // Last year's month gives a typical rain per day. Scale it to the trip length
+  // so this number means the same thing as the forecast's trip total.
+  const tripDays = Math.max(1, Math.round((new Date(returnDate || departDate) - tripDate) / DAY) + 1);
+  const avgDaily = rainArr.length ? rainArr.reduce((a, b) => a + b, 0) / rainArr.length : 0;
+
   return {
     location: `${name}, ${country}`,
     minTemp: Math.round(minArr.reduce((a, b) => a + b, 0) / minArr.length),
     maxTemp: Math.round(maxArr.reduce((a, b) => a + b, 0) / maxArr.length),
-    rainMm: rainArr.length
-      ? Math.round((rainArr.reduce((a, b) => a + b, 0) / rainArr.length) * 10) / 10
-      : 0,
+    rainMm: Math.round(avgDaily * tripDays * 10) / 10,
     summary: `Typical for ${tripDate.toLocaleString("en-IN", { month: "long" })} (last year's weather)`,
     source: "open-meteo archive",
     type: "climate",
   };
+}
+
+function mostCommon(codes) {
+  const counts = new Map();
+  for (const c of codes || []) if (Number.isFinite(c)) counts.set(c, (counts.get(c) || 0) + 1);
+  let best = 0;
+  let bestCount = 0;
+  for (const [code, n] of counts) {
+    if (n > bestCount) {
+      best = code;
+      bestCount = n;
+    }
+  }
+  return best;
 }
 
 function describeWeather(code) {

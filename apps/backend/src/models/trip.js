@@ -29,12 +29,17 @@ const tripSchema = new mongoose.Schema(
     },
     brief: { type: mongoose.Schema.Types.Mixed, default: {} },
     packages: { type: [mongoose.Schema.Types.Mixed], default: [] },
-chosenTier: { type: String },
-itinerary: { type: mongoose.Schema.Types.Mixed, default: null },
-feePaid: { type: Boolean, default: false },
-feeAmount: { type: Number },
-paymentId: { type: String },
-paidAt: { type: Date },
+    chosenTier: { type: String },
+    itinerary: { type: mongoose.Schema.Types.Mixed, default: null },
+
+    // Fee
+    feePaid: { type: Boolean, default: false },
+    feeAmount: { type: Number },
+    paymentId: { type: String },
+    paidAt: { type: Date },
+
+    // PAUSE / RESUME (PRD section 11): a paused trip gets no alerts or follow-ups
+    paused: { type: Boolean, default: false },
   },
   { timestamps: true }
 );

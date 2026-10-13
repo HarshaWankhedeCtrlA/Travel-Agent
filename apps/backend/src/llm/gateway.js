@@ -5,6 +5,9 @@
 // that JSON in code. The model only understands text. It never produces prices
 // or availability, and nothing it returns is used without validation.
 //
+// generateText(messages, opts) is the second entry point: free-text replies
+// (used by ask.js to word questions). Same key, timeout and logging.
+//
 // Environment:
 //   XAI_API_KEY      required
 //   GROK_MODEL       optional, default "grok-4.7" (check the xAI console)
@@ -50,7 +53,7 @@ export async function extractBrief(text, { expect, brief } = {}) {
     if (!cfg.apiKey) throw new LlmError("missing_key", "XAI_API_KEY is not set");
 
     const messages = buildMessages(text, { expect, brief });
-    const content = await callGrok(cfg, messages);
+    const content = await callGrok(cfg, messages, { json: true });
     return validateBrief(parseJson(content), { brief });
   } catch (err) {
     const canFallBack = cfg.fallbackToRules && !(err instanceof LlmError && err.code === "auth");
@@ -60,6 +63,15 @@ export async function extractBrief(text, { expect, brief } = {}) {
     }
     throw err;
   }
+}
+
+// Free-text generation (no JSON). Throws LlmError on failure; the caller
+// decides what to fall back to.
+export async function generateText(messages, { temperature = 0.7, maxTokens = 300 } = {}) {
+  const cfg = config();
+  if (!cfg.apiKey) throw new LlmError("missing_key", "XAI_API_KEY is not set");
+  const content = await callGrok(cfg, messages, { json: false, temperature, maxTokens });
+  return String(content).trim();
 }
 
 // ── Prompt ───────────────────────────────────────────────────
@@ -108,7 +120,8 @@ function buildMessages(text, { expect, brief }) {
 }
 
 // Send the model the trip text only: no emails, phone numbers or long digit strings.
-function redact(text) {
+// Exported so every caller (extractBrief, ask.js) sanitises user text the same way.
+export function redact(text) {
   return String(text || "")
     .slice(0, MAX_INPUT_CHARS)
     .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]")
@@ -118,17 +131,20 @@ function redact(text) {
 
 // ── HTTP ─────────────────────────────────────────────────────
 
-async function callGrok(cfg, messages) {
-  // JSON mode is requested first. If the provider or model rejects it, we retry
-  // once without it; the prompt already demands JSON and parseJson() copes.
-  let jsonMode = true;
+async function callGrok(cfg, messages, opts = {}) {
+  const { json = true, temperature = 0, maxTokens = MAX_OUTPUT_TOKENS } = opts;
+
+  // JSON mode is requested first (when json=true). If the provider or model
+  // rejects it, we retry once without it; the prompt already demands JSON and
+  // parseJson() copes.
+  let jsonMode = json;
 
   const buildBody = () => {
     const payload = {
       model: cfg.model,
       messages,
-      temperature: 0,
-      max_tokens: MAX_OUTPUT_TOKENS,
+      temperature,
+    max_tokens: cfg.model.startsWith("openai/gpt-oss") ? Math.max(maxTokens, 600) : maxTokens,
     };
     if (jsonMode) payload.response_format = { type: "json_object" };
     // Groq's gpt-oss models accept reasoning_effort; keep thinking short and cheap

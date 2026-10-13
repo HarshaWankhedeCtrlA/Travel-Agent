@@ -1,30 +1,18 @@
-import Trip from "../models/trip.js";
-import { createPaymentLink, FEE_INR } from "../providers/payment.js";
+import { FEE_INR } from "../providers/payment.js";
 
+// Builds the payment link the traveler gets on WhatsApp.
+//
+// No Razorpay call and no database write here: the checkout page creates the
+// order itself (routes/payment.js, POST /create-order), and marking a trip as
+// paid is done only by that route (/confirm and the webhook).
 export async function initiateFee(trip) {
   if (trip.feePaid) return { alreadyPaid: true, amount: trip.feeAmount };
 
-  const { id, url, amount } = await createPaymentLink({
-  tripId: trip._id.toString(),
-  amount: FEE_INR,
-});
-
-  trip.paymentId = id;
-  trip.feeAmount = amount;
-  await trip.save();
-
-  return { id, url, amount };
-}
-
-export async function markPaid(tripId, paymentId, amount) {
-  const trip = await Trip.findById(tripId);
-  if (!trip) throw new Error("Trip not found");
-  trip.feePaid = true;
-  trip.feeAmount = amount;
-  trip.paymentId = paymentId;
-  trip.paidAt = new Date();
-  await trip.save();
-  return trip;
+  const base = (process.env.APP_BASE_URL || "http://localhost:3000").replace(/\/$/, "");
+  return {
+    url: `${base}/api/payment/checkout/${trip._id}`,
+    amount: FEE_INR,
+  };
 }
 
 export { FEE_INR };

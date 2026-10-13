@@ -4,15 +4,25 @@ import { drainOutbox } from "../providers/whatsapp.js";
 
 const router = Router();
 
+// The mock chat is for local testing only. With real WhatsApp (twilio) these
+// routes are off, because anyone could otherwise send a message as any phone number.
+const mockEnabled = () => (process.env.WHATSAPP_PROVIDER || "mock").toLowerCase() !== "twilio";
+router.use(["/mock", "/outbox"], (_req, res, next) => (mockEnabled() ? next() : res.sendStatus(404)));
+
 // Chat-mock posts here
 router.post("/mock", async (req, res, next) => {
   try {
-    const { from, body } = req.body;
+    // req.body is undefined (not {}) when the request has no JSON body or no
+    // "Content-Type: application/json" header, so read it safely.
+    const { from, body } = req.body || {};
     if (!from || !body) {
-      return res.status(400).json({ error: "from and body are required" });
+      return res.status(400).json({
+        error: 'Send JSON like {"from":"9876543210","body":"hi"} with header Content-Type: application/json',
+      });
     }
-    const result = await handleIncoming({ from, body });
-    const replies = drainOutbox(from);
+    const phone = String(from);
+    const result = await handleIncoming({ from: phone, body: String(body) });
+    const replies = drainOutbox(phone);
     res.json({ ok: true, ...result, replies });
   } catch (err) {
     next(err);
