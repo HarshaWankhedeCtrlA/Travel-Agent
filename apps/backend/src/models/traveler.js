@@ -5,6 +5,9 @@ const travelerSchema = new mongoose.Schema(
     phone: { type: String, required: true, unique: true, index: true },
     name: { type: String },
     language: { type: String, default: "en" },
+    // Set when the traveler picks a language with ENGLISH / HINGLISH / HINDI.
+    // Then it is never changed by guessing from their messages.
+    languageLocked: { type: Boolean, default: false },
 
     // STOP / START (PRD section 11 commands, section 13 consent)
     optedOut: { type: Boolean, default: false },

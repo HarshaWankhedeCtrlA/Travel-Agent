@@ -24,12 +24,15 @@ const COMMANDS = {
   STATUS: ["status"],
   DELETE: ["delete", "delete data"],
   CONFIRM_DELETE: ["delete my data"],
+  LANG_EN: ["english"],
+  LANG_HINGLISH: ["hinglish"],
+  LANG_HI: ["hindi", "हिंदी", "हिन्दी"],
 };
 
 export function parseCommand(text) {
   const n = String(text || "")
     .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/[^\p{L}\p{M}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
   if (!n) return null;
@@ -56,6 +59,7 @@ const TEXT = {
         `• PAUSE / RESUME: stop or restart updates for your latest trip`,
         `• STOP: stop all messages (START to come back)`,
         `• DELETE: delete your data`,
+        `• ENGLISH / HINGLISH / HINDI: choose the language I reply in`,
         ...(support ? [``, `To reach a person: ${support}`] : []),
       ].join("\n"),
     noTrip: `You have no active trip right now. Tell me where you want to go.`,
@@ -77,6 +81,7 @@ const TEXT = {
     },
     deleteAsk: `This permanently deletes your trips, chat history and profile, and it can't be undone.\n\nTo confirm, reply exactly: DELETE MY DATA`,
     deleted: `Done. Your trips, chat history and profile have been deleted. Records of a payment may be kept where the law requires it, without your trip details. Message me any time to start fresh.`,
+    langSet: `Okay, I'll reply in English from now on.`,
   },
   hinglish: {
     stopped: `Aap opt-out ho gaye, ab main aapko message nahi karunga. Wapas aane ke liye kabhi bhi START likho.`,
@@ -92,6 +97,7 @@ const TEXT = {
         `• PAUSE / RESUME: latest trip ke updates roko ya dobara chalu karo`,
         `• STOP: saare messages band (wapas aane ke liye START)`,
         `• DELETE: apna data hatao`,
+        `• ENGLISH / HINGLISH / HINDI: main kis language mein jawab doon, wo chuno`,
         ...(support ? [``, `Insaan se baat karne ke liye: ${support}`] : []),
       ].join("\n"),
     noTrip: `Abhi aapka koi active trip nahi hai. Batao kahan jaana hai.`,
@@ -113,6 +119,7 @@ const TEXT = {
     },
     deleteAsk: `Isse aapke trips, chat history aur profile hamesha ke liye delete ho jayenge, wapas nahi aayenge.\n\nConfirm karne ke liye ye likho: DELETE MY DATA`,
     deleted: `Ho gaya. Aapke trips, chat history aur profile delete ho gaye. Payment ka record, jahan kanoon maangta hai, aapke trip ki details ke bina rakha ja sakta hai. Kabhi bhi message karo, naye sire se shuru karenge.`,
+    langSet: `Theek hai, ab main Hinglish mein jawab dunga.`,
   },
 };
 
@@ -181,6 +188,20 @@ export async function runCommand(cmd, traveler, lang) {
         return `${i + 1}. ${label}: ${stage}${t.paused ? ` [${tx.pausedTag}]` : ""}`;
       });
       return { text: `${tx.statusHead}\n${lines.join("\n")}`, log: true };
+    }
+
+    case "LANG_EN":
+    case "LANG_HINGLISH":
+    case "LANG_HI": {
+      const chosen = cmd === "LANG_EN" ? "en" : cmd === "LANG_HI" ? "hi" : "hinglish";
+      traveler.language = chosen;
+      traveler.languageLocked = true;
+      await traveler.save();
+      const text =
+        chosen === "hi"
+          ? `ठीक है, मैं हिंदी में जवाब देने की कोशिश करूँगा। कुछ तय संदेश अभी Hinglish में आएंगे।`
+          : T(chosen).langSet;
+      return { text, log: true };
     }
 
     case "DELETE":

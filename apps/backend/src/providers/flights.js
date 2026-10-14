@@ -3,9 +3,18 @@
 // Everything returned here comes from the provider. Fields the provider does not
 // give us are null (unknown), never a made-up default. PRD section 13: the agent
 // never claims a price, rating or condition that is not in the provider data.
+//
+// Results are cached per route and date for a short time. The preview checks that
+// flights exist BEFORE the fee is asked; after payment the packages reuse the same
+// search, so that check costs nothing extra.
 
 const SERPAPI_URL = "https://serpapi.com/search";
 const TIMEOUT_MS = 20000;
+
+const CACHE_TTL_MS = 30 * 60 * 1000; // a route with flights
+const EMPTY_TTL_MS = 10 * 60 * 1000; // a route with none, so a retry does not pay again
+const MAX_CACHE = 200;
+const routeCache = new Map(); // key -> { at, ttl, flights }
 
 const IATA = {
   // Metro
@@ -47,6 +56,9 @@ function toIATA(city) {
 
 const isValidDate = (d) => typeof d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(d);
 
+// Throws an error starting with "No flights" when there is no airport for a city.
+// Returns [] when the route simply has no flights. Prices are per person; the
+// total is worked out for the number of travelers asked for.
 export async function searchFlights({ origin, destination, departDate, returnDate, travelers = 1 }) {
   const apiKey = process.env.SERPAPI_KEY;
   if (!apiKey) throw new Error("SERPAPI_KEY not set");
@@ -59,6 +71,23 @@ export async function searchFlights({ origin, destination, departDate, returnDat
     throw new Error(`No flights: no airport known for "${unknown}". Try a nearby major city.`);
   }
 
+  const key = `${from}|${to}|${departDate}|${isValidDate(returnDate) ? returnDate : ""}`;
+  const hit = routeCache.get(key);
+
+  let list;
+  if (hit && Date.now() - hit.at < hit.ttl) {
+    list = hit.flights;
+    console.log(`[flights] cache hit ${from}→${to} ${departDate} (${list.length} results)`);
+  } else {
+    list = await fetchRoute({ apiKey, from, to, origin, destination, departDate, returnDate, travelers });
+    if (routeCache.size >= MAX_CACHE) routeCache.delete(routeCache.keys().next().value);
+    routeCache.set(key, { at: Date.now(), ttl: list.length ? CACHE_TTL_MS : EMPTY_TTL_MS, flights: list });
+  }
+
+  return list.map((f) => ({ ...f, totalPrice: f.pricePerPerson * travelers }));
+}
+
+async function fetchRoute({ apiKey, from, to, origin, destination, departDate, returnDate, travelers }) {
   const url = new URL(SERPAPI_URL);
   url.searchParams.set("engine", "google_flights");
   url.searchParams.set("departure_id", from);
@@ -100,6 +129,7 @@ export async function searchFlights({ origin, destination, departDate, returnDat
     const errMsg = String(data.error).toLowerCase();
     // "no results" is a valid response, not an error — return empty
     if (errMsg.includes("hasn't returned any results") || errMsg.includes("no results")) {
+      console.log("[flights] no usable results");
       return [];
     }
     throw new Error(`SerpAPI: ${data.error}`);
@@ -135,7 +165,6 @@ export async function searchFlights({ origin, destination, departDate, returnDat
         // The provider flags only flights that are often late, so false means "not flagged"
         oftenDelayed: legs.some((l) => l.often_delayed_by_over_30_min === true),
         pricePerPerson: f.price,
-        totalPrice: f.price * travelers,
         currency: "INR",
         // Not in the data we read, so unknown. Do not show these as facts.
         baggageIncluded: null,

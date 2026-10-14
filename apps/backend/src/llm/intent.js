@@ -11,7 +11,12 @@ import { generateText, redact } from "./gateway.js";
 
 const DEVANAGARI = /[\u0900-\u097F]/;
 const HINGLISH =
-  /\b(hai|hain|nahi|nahin|kya|kaise|kaisa|kahan|kab|kitne|kitna|chahiye|chahta|chahte|chahti|jana|jaana|mujhe|mera|meri|hum|aap|mein|haan|sasta|accha|achha|theek|thik|bhai|ghoomna|ghumna|lakh|hazaar|log|din|raat|wala|wali|karna|karni|karo|dena|batao|bata|dikhao|chalo)\b/i;
+  /\b(hai|hain|nahi|nahin|kya|kaise|kaisa|kahan|kab|kitne|kitna|chahiye|chahta|chahte|chahti|jana|jaana|jaa|mujhe|mera|meri|hum|aap|mein|haan|sasta|accha|achha|theek|thik|bhai|ghoomna|ghumna|lakh|hazaar|log|din|raat|wala|wali|karna|karni|karo|dena|batao|bata|dikhao|chalo|se|ko|ka|ki|ke|pe|aur|bhi|tak|hoon|hoga|rahe|raha|rahi|apna|bahut|thoda|zyada)\b/i;
+
+// Common English words. Short English replies like "4 people" or "50k budget" carry
+// no Hindi marker, and without this they gave no language signal at all.
+const ENGLISH =
+  /\b(the|and|for|with|from|want|need|trip|people|persons|nights?|days?|budget|please|how|what|when|where|can|you|my|our|we|is|are|going|travel|travell?ing|planning|flights?|hotels?|cheap|cheapest|best|value|comfortable|total|rupees)\b/i;
 
 // Returns "hi" | "hinglish" | "en" | null.
 // null means "no clear signal" (for example "3" or "Delhi"), so the caller
@@ -20,6 +25,7 @@ export function detectLanguage(text) {
   const t = String(text || "");
   if (DEVANAGARI.test(t)) return "hi";
   if (HINGLISH.test(t)) return "hinglish";
+  if (ENGLISH.test(t)) return "en";
   const words = t.match(/[A-Za-z]{2,}/g) || [];
   return words.length >= 4 ? "en" : null;
 }

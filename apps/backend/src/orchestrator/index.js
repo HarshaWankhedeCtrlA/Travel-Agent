@@ -8,6 +8,7 @@ import { detectLanguage, isYes, pickTier, classify, answerQuestion } from "../ll
 import { buildPackages, formatPackageMessage } from "../services/packages.js";
 import { buildItinerary, formatDayMessage, formatSummaryMessage } from "../services/itinerary.js";
 import { buildPreview, formatPreviewMessage } from "../services/preview.js";
+import { searchFlights } from "../providers/flights.js";
 import { initiateFee, FEE_INR } from "../services/payments.js";
 import { parseCommand, runCommand } from "../services/commands.js";
 
@@ -65,9 +66,15 @@ const TEXT = {
     previewNudge: `Say "pay" to get the payment link, or tell me what to change.`,
     working: `Still working on it, one moment...`,
     searching: (d) => `Payment confirmed. Searching flights and hotels for ${d}...`,
+    // Before any fee: no flights on this route, so no payment is asked
+    noFlightsPreview: (o, d, date) =>
+      `I couldn't find any flights from ${o} to ${d} on ${date}, so I haven't asked for any payment.\n\nI plan flights + hotels only. For a short trip between nearby cities, a train or cab is usually easier. Tell me a different city or date, or type "new trip".`,
+    // After the fee: nothing is lost, the traveler can change the details
     noFlights: (o, d, date) =>
-      `No flights found from ${o} to ${d} on ${date}.\n\nTry a nearby major city, or change your dates. Reply "new trip" to start over.`,
-    packagesError: `Sorry, couldn't fetch packages right now. Say "pay" and I'll check your payment and try again.`,
+      `I couldn't find any flights from ${o} to ${d} on ${date}.\n\nYour fee is safe and stays valid for this trip. Tell me a different city or date and I'll search again at no extra cost. For a refund, type HELP.`,
+    packagesError: `Sorry, couldn't fetch packages right now. Your fee is safe. Say "yes" in a minute and I'll try again.`,
+    checkError: `Sorry, I can't check flights right now, so I haven't asked for any payment. Please say "yes" again in a minute.`,
+    paidNudge: `Your fee is paid. Say "yes" to search again, or tell me what to change (city or dates).`,
     pickPrompt: (n) =>
       `Those are your ${n} options.\n\nReply with "cheapest", "best value", or "comfortable" and I'll build your itinerary.`,
     pickNudge: `Reply with "cheapest", "best value", or "comfortable" to pick one.`,
@@ -104,9 +111,13 @@ const TEXT = {
     previewNudge: `Payment link ke liye "pay" likho, ya bolo kya change karna hai.`,
     working: `Abhi kaam chal raha hai, thoda ruko...`,
     searching: (d) => `Payment mil gaya. ${d} ke liye flights aur hotels dhoondh raha hoon...`,
+    noFlightsPreview: (o, d, date) =>
+      `${o} se ${d} ke liye ${date} ko mujhe koi flight nahi mili, isliye maine payment nahi maangi.\n\nMain sirf flights + hotels plan karta hoon. Paas ke shehron ke beech train ya cab aam taur par aasaan hoti hai. Koi aur city ya date batao, ya "new trip" likho.`,
     noFlights: (o, d, date) =>
-      `${o} se ${d} ke liye ${date} ko koi flight nahi mili.\n\nPaas ka bada city try karo, ya dates badlo. Shuru se karne ke liye "new trip" likho.`,
-    packagesError: `Sorry, abhi packages nahi la paya. "pay" likho, main payment check karke dobara koshish karunga.`,
+      `${o} se ${d} ke liye ${date} ko mujhe koi flight nahi mili.\n\nAapki fee safe hai aur isi trip ke liye valid rahegi. Koi aur city ya date batao, main bina extra paise ke dobara dhoondh dunga. Refund ke liye HELP likho.`,
+    packagesError: `Sorry, abhi packages nahi la paya. Aapki fee safe hai. Ek minute baad "yes" likho, main dobara koshish karunga.`,
+    checkError: `Sorry, abhi flights check nahi kar pa raha, isliye maine payment nahi maangi. Ek minute baad dobara "yes" likho.`,
+    paidNudge: `Aapki fee ho chuki hai. Dobara dhoondhne ke liye "yes" likho, ya bolo kya change karna hai (city ya dates).`,
     pickPrompt: (n) =>
       `Ye hain aapke ${n} options.\n\n"cheapest", "best value" ya "comfortable" likho, main itinerary bana dunga.`,
     pickNudge: `Chunne ke liye "cheapest", "best value" ya "comfortable" likho.`,
@@ -143,10 +154,10 @@ export async function handleIncoming({ from, body }) {
   // Remember the language the traveler writes in. Short replies like "3" give
   // no signal (null), so the saved language stays.
   const detected = detectLanguage(body);
-  if (detected && detected !== traveler.language) {
-    traveler.language = detected;
-    await traveler.save();
-  }
+if (detected) {
+  traveler.language = detected;
+  await traveler.save();
+}
   const lang = traveler.language || "en";
 
   const cmd = parseCommand(body);
@@ -351,7 +362,43 @@ async function applyBriefEdit(trip, traveler, from, body, lang, extracted) {
 // Free preview, then the fee link. No flight or hotel search yet.
 async function sendPreview(trip, traveler, from, lang) {
   const tx = T(lang);
+
+  // Already paid (the traveler changed the details after a search that found nothing):
+  // no preview and no second fee, search again straight away
+  if (trip.feePaid) {
+    trip.status = "PREVIEW_SENT";
+    await trip.save();
+    return sendPackages(trip, traveler, from, lang);
+  }
+
   await sendAndLog(from, traveler, trip, tx.previewing(trip.brief.destination));
+
+  // Never ask for money for a trip that has no flights. The search is cached, so the
+  // packages after payment reuse it and this check costs nothing extra.
+  const b = trip.brief;
+  let flightsOk = true;
+  try {
+    const found = await searchFlights({
+      origin: b.origin,
+      destination: b.destination,
+      departDate: b.departDate,
+      returnDate: b.returnDate,
+      travelers: b.travelers || 1,
+    });
+    flightsOk = found.length > 0;
+  } catch (err) {
+    if (String(err.message).startsWith("No flights")) {
+      flightsOk = false;
+    } else {
+      // Cannot verify (provider down): do not take a fee for something we could not check
+      console.error("[preview] flight check failed:", err.message);
+      return say(trip, traveler, from, tx.checkError);
+    }
+  }
+  if (!flightsOk) {
+    return say(trip, traveler, from, tx.noFlightsPreview(b.origin, b.destination, b.departDate));
+  }
+
 
   let preview = null;
   try {
@@ -388,8 +435,19 @@ async function sendFeeLink(trip, traveler, from, lang) {
 async function handlePreviewSent(trip, traveler, from, body, lang) {
   const tx = T(lang);
 
-  // Paid, and the packages did not start by themselves: start them now
-  if (trip.feePaid) return sendPackages(trip, traveler, from, lang);
+  // Fee already paid, but the packages have not gone out (still running, or the search found nothing)
+  if (trip.feePaid) {
+    if (busy.has(String(trip._id))) return say(trip, traveler, from, tx.working);
+    if (isYes(body) || LINK_RE.test(body)) return sendPackages(trip, traveler, from, lang);
+
+    // The traveler may be changing the city or dates after a failed search
+    const edit = await tryExtract(body, { brief: trip.brief });
+    if (!edit) return say(trip, traveler, from, tx.llmDown);
+    if (Object.keys(edit).length > 0) {
+      return applyBriefEdit(trip, traveler, from, body, lang, edit);
+    }
+    return say(trip, traveler, from, tx.paidNudge);
+  }
 
   if (PAID_CLAIM_RE.test(body)) return say(trip, traveler, from, tx.notPaidYet);
   if (isYes(body) || LINK_RE.test(body)) return sendFeeLink(trip, traveler, from, lang);
