@@ -5,6 +5,7 @@ import tripsRouter from "./routes/trips.js";
 import webhookRouter from "./routes/webhook.js";
 import paymentRouter from "./routes/payment.js";
 import whatsappRouter from "./routes/whatsapp.js";
+import itineraryRouter from "./routes/itinerary.js";
 const app = express();
 
 app.use(cors());
@@ -22,7 +23,7 @@ app.use("/api/trips", tripsRouter);
 app.use("/api/webhook", webhookRouter);
 app.use("/api/payment", paymentRouter);
 app.use("/api/whatsapp", whatsappRouter);
-
+app.use("/itinerary", itineraryRouter);
 app.use((err, _req, res, _next) => {
   if (err instanceof mongoose.Error.ValidationError || err instanceof mongoose.Error.CastError) {
     return res.status(400).json({ error: err.message });

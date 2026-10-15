@@ -18,7 +18,12 @@
     "dotenv": "^16.4.7",
     "express": "^5.1.0",
     "mongoose": "^8.19.1",
+    "node-cron": "^4.6.0",
+    "pdfkit": "^0.20.2",
     "razorpay": "^2.9.8",
     "twilio": "^6.2.0"
+  },
+  "devDependencies": {
+    "@types/pdfkit": "^0.17.6"
   }
 }

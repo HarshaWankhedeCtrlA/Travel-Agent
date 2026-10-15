@@ -12,6 +12,8 @@ router.use(["/mock", "/outbox"], (_req, res, next) => (mockEnabled() ? next() : 
 // Chat-mock posts here
 router.post("/mock", async (req, res, next) => {
   try {
+    console.log(`\n>>> [mock] POST hit — from=${req.body?.from} body="${req.body?.body}"`);
+
     const { from, body } = req.body || {};
     if (!from || !body) {
       return res.status(400).json({

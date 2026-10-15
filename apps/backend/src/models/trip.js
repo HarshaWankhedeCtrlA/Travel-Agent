@@ -40,6 +40,18 @@ const tripSchema = new mongoose.Schema(
 
     // PAUSE / RESUME (PRD section 11): a paused trip gets no alerts or follow-ups
     paused: { type: Boolean, default: false },
+    // F6 — Price watch (PRD §6)
+watchPaused: { type: Boolean, default: false },
+lastAlertAt: { type: Date },
+lastCheckedAt: { type: Date, index: true },
+baselinePrice: { type: Number },
+remindersSent: {
+  type: [String],
+  default: [],
+},
+// Shareable itinerary link — random token, revocable
+shareToken: { type: String, index: true },
+shareEnabled: { type: Boolean, default: true },
   },
   { timestamps: true }
 );

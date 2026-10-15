@@ -11,22 +11,20 @@ import { buildPreview, formatPreviewMessage } from "../services/preview.js";
 import { searchFlights } from "../providers/flights.js";
 import { initiateFee, FEE_INR } from "../services/payments.js";
 import { parseCommand, runCommand } from "../services/commands.js";
+import crypto from "node:crypto";
 
 // Trip flow (PRD section 4):
 //   DRAFT -> BRIEF_CONFIRMED -> PREVIEW_SENT -> (fee paid) PACKAGES_SENT -> ITINERARY_SENT
 // Flight and hotel searches start only after the fee is paid.
 
-// Order matters: this is the order the bot asks the questions in.
 const REQUIRED_FIELDS = ["origin", "destination", "departDate", "returnDate", "travelers", "budget"];
 
-// Missing fields are asked in these pairs (one message, at most two questions).
 const ASK_GROUPS = [
   ["origin", "destination"],
   ["departDate", "returnDate"],
   ["travelers", "budget"],
 ];
 
-// A trip is "active" until it is booked or cancelled.
 const TERMINAL_STATUSES = ["BOOKED", "CANCELLED"];
 const MAX_ACTIVE_TRIPS = 3;
 
@@ -34,10 +32,8 @@ const NEW_TRIP_RE = /^(new trip|start a new trip|plan another trip|another trip|
 const PAID_CLAIM_RE = /\b(paid|ho gaya|hogaya|kar diya|kardiya|done)\b/i;
 const LINK_RE = /\b(pay|payment|link|continue|proceed|aage)\b/i;
 const NOT_NOW_RE = /\b(not now|later|baad mein|abhi nahi|no thanks|nahi chahiye)\b/i;
-const GREETING_RE = /^(hi+|hello+|hey+|hlo|hola|namaste|namaskar)\W*$/i;
+const GREETING_RE = /^(hi+|hello+|hey+|hlo|hola|namaste|namaskar|yo|sup|good\s+(morning|afternoon|evening|night))\W*$/i;
 
-// One expensive job (packages, itinerary) per trip at a time, so a payment
-// callback and a "paid" message arriving together cannot run it twice.
 const busy = new Set();
 function lock(tripId) {
   const key = String(tripId);
@@ -48,12 +44,13 @@ function lock(tripId) {
 
 // ─────────────────────────────────────────────────────────────
 // Fixed bot messages. Numbers and package data stay in code; only the
-// wording is translated. "hi" (Devanagari) currently uses the Hinglish set.
+// wording is translated.
+
 const TEXT = {
   en: {
     newTripLimit: (n) =>
       `You already have ${n} active trips, which is the limit. Finish or cancel one before starting another.`,
-    newTripStart: `Sure, let's plan a new trip. Where do you want to go? (a city or region)`,
+    newTripStart: `Sure, let's plan a new trip 👋\n\nWhere do you want to go? (a city or region)`,
     briefReady: (s) => `Great! Here's your trip brief:\n\n${s}\n\nType "yes" to see your free preview.`,
     briefUpdated: (s) => `Updated. New brief:\n\n${s}\n\nType "yes" when ready.`,
     confirmNudge: `Type "yes" to see your free preview, or tell me what to change.`,
@@ -66,10 +63,8 @@ const TEXT = {
     previewNudge: `Say "pay" to get the payment link, or tell me what to change.`,
     working: `Still working on it, one moment...`,
     searching: (d) => `Payment confirmed. Searching flights and hotels for ${d}...`,
-    // Before any fee: no flights on this route, so no payment is asked
     noFlightsPreview: (o, d, date) =>
       `I couldn't find any flights from ${o} to ${d} on ${date}, so I haven't asked for any payment.\n\nI plan flights + hotels only. For a short trip between nearby cities, a train or cab is usually easier. Tell me a different city or date, or type "new trip".`,
-    // After the fee: nothing is lost, the traveler can change the details
     noFlights: (o, d, date) =>
       `I couldn't find any flights from ${o} to ${d} on ${date}.\n\nYour fee is safe and stays valid for this trip. Tell me a different city or date and I'll search again at no extra cost. For a refund, type HELP.`,
     packagesError: `Sorry, couldn't fetch packages right now. Your fee is safe. Say "yes" in a minute and I'll try again.`,
@@ -84,21 +79,40 @@ const TEXT = {
     itineraryError: `Sorry, I couldn't build the itinerary right now. Send your pick again in a minute.`,
     itineraryEnd: `Want to change anything? Type "new trip" to plan another.`,
     llmDown: `Sorry, I'm having trouble understanding messages right now. Please try again in a minute.`,
-    laterDone: (d) => `Your itinerary for ${d} has already been sent. To plan another trip, type "new trip".`,
-    laterProgress: (d) => `Your trip to ${d} is in progress. To plan another trip, type "new trip".`,
-    // First message: who we are, what we do, what it costs (PRD section 11 F1, section 13)
+    laterDone: (d) =>
+      `Your itinerary for ${d} has already been sent 👋\n\nWant to plan another trip? Just tell me where and when, or type "new trip".`,
+    laterProgress: (d) =>
+      `Your trip to ${d} is in progress 👋\n\nTell me what you'd like to change, or type "new trip" to start fresh.`,
     intro: (withAsk) =>
-      `Hi! I'm an AI travel assistant on WhatsApp.\n\n` +
-      `Tell me where you want to go and I'll plan the trip: a free preview first, then 3 packages with all-in prices and a day-by-day itinerary.\n\n` +
-      `Planning costs a one-time ₹${FEE_INR} per trip, and you see the free preview before paying. Type HELP any time, or STOP to stop messages.` +
-      (process.env.TERMS_URL ? `\n\nBy continuing you agree to our terms and privacy policy: ${process.env.TERMS_URL}` : "") +
-      (withAsk ? `\n\nWhere do you want to go?` : ""),
+      `Hi! I'm your AI travel planner 👋\n\n` +
+      `I'll help you plan a trip: a free preview, 3 packages with all-in prices, and a day-by-day itinerary.\n\n` +
+      `The planning is a one-time ₹${FEE_INR} per trip, and you see the free preview before paying. Type HELP any time, or STOP to stop messages.` +
+      (process.env.TERMS_URL ? `\n\nBy continuing you agree to our terms: ${process.env.TERMS_URL}` : "") +
+      (withAsk ? `\n\nWhere would you like to go?` : ""),
+    greetingReply: `Hi there! 👋 How can I help you today?\n\nI'm your AI travel planner. You can tell me:\n• "Delhi to Goa in December, 40k, 2 people"\n• "Somewhere warm next month"\n• Or type HELP to see what I can do.`,
+    greetingWithTrip: (trip) => {
+      const d = trip.brief?.destination || "your trip";
+      if (trip.status === "BRIEF_CONFIRMED") {
+        return `Hi! 👋 Your ${d} trip is ready for review. Type "yes" to see the free preview, or tell me what to change.`;
+      }
+      if (trip.status === "PREVIEW_SENT") {
+        return `Hi! 👋 Your ${d} preview was sent. Say "pay" for the payment link, or tell me what to change.`;
+      }
+      if (trip.status === "PACKAGES_SENT") {
+        return `Hi! 👋 I sent your 3 ${d} packages. Reply "cheapest", "best value", or "comfortable" to pick one.`;
+      }
+      if (trip.status === "ITINERARY_SENT") {
+        return `Hi! 👋 Your ${d} itinerary is ready. Want to plan another trip? Just say where and when.`;
+      }
+      return `Hi! 👋 You have a trip in progress. Tell me what you'd like to do.`;
+    },
+    helpNudge: `I'm here to help! 👋 Tell me about your trip — where you want to go, when, and your budget.\n\nFor example:\n• "Delhi to Goa in December, 40k, 2 people"\n• "Somewhere warm next month"\n\nOr type HELP for what I can do.`,
     sensitiveWarn: `Please don't share passport, card, Aadhaar or OTP details in this chat. I have not saved it, and I don't need it. Please delete that message from this chat. You enter identity and payment details only on the secure page when you book.`,
   },
   hinglish: {
     newTripLimit: (n) =>
       `Aapke paas already ${n} active trips hain, ye limit hai. Naya trip shuru karne se pehle ek ko poora ya cancel karo.`,
-    newTripStart: `Chalo, naya trip plan karte hain. Kahan jaana chahte ho? (city ya region)`,
+    newTripStart: `Chalo, naya trip plan karte hain 👋\n\nKahan jaana chahte ho? (city ya region)`,
     briefReady: (s) => `Badhiya! Ye raha aapka trip brief:\n\n${s}\n\nFree preview dekhne ke liye "yes" likho.`,
     briefUpdated: (s) => `Update ho gaya. Naya brief:\n\n${s}\n\nTaiyaar ho to "yes" likho.`,
     confirmNudge: `Free preview dekhne ke liye "yes" likho, ya bolo kya change karna hai.`,
@@ -127,49 +141,144 @@ const TEXT = {
     itineraryError: `Sorry, abhi itinerary nahi ban payi. Ek minute baad apna pick dobara bhejo.`,
     itineraryEnd: `Kuch change karna hai? Naya trip plan karne ke liye "new trip" likho.`,
     llmDown: `Sorry, abhi aapka message samajhne mein dikkat ho rahi hai. Ek minute baad try karo.`,
-    laterDone: (d) => `${d} ki itinerary bhej di gayi hai. Naya trip plan karne ke liye "new trip" likho.`,
-    laterProgress: (d) => `Aapka ${d} ka trip chal raha hai. Naya trip plan karne ke liye "new trip" likho.`,
+    laterDone: (d) =>
+      `${d} ki itinerary bhej di gayi hai 👋\n\nNaya trip plan karna hai? Bas batao kahan aur kab, ya "new trip" likho.`,
+    laterProgress: (d) =>
+      `Aapka ${d} ka trip chal raha hai 👋\n\nBolo kya change karna hai, ya "new trip" likho naye sire se shuru karne ke liye.`,
     intro: (withAsk) =>
-      `Namaste! Main WhatsApp par ek AI travel assistant hoon.\n\n` +
-      `Batao kahan jaana hai, main trip plan kar dunga: pehle free preview, phir all-in prices ke saath 3 packages aur din-ba-din itinerary.\n\n` +
-      `Planning ka one-time ₹${FEE_INR} per trip lagta hai, aur paise dene se pehle aap free preview dekhte ho. Kabhi bhi HELP likho, ya messages band karne ke liye STOP.` +
-      (process.env.TERMS_URL ? `\n\nAage badhne ka matlab hai aap hamari terms aur privacy policy se sehmat ho: ${process.env.TERMS_URL}` : "") +
+      `Namaste! Main aapka AI travel planner hoon 👋\n\n` +
+      `Main aapka trip plan karunga: pehle free preview, phir all-in prices ke saath 3 packages aur din-ba-din itinerary.\n\n` +
+      `Planning ka one-time ₹${FEE_INR} per trip lagta hai, aur paise dene se pehle aap free preview dekhte ho. Kabhi bhi HELP likho, ya STOP for messages band.` +
+      (process.env.TERMS_URL ? `\n\nAage badhne ka matlab hai aap hamari terms se sehmat ho: ${process.env.TERMS_URL}` : "") +
       (withAsk ? `\n\nKahan jaana chahte ho?` : ""),
+    greetingReply: `Namaste! 👋 Main aapki kaise help kar sakta hoon?\n\nMain aapka AI travel planner hoon. Aap mujhe bata sakte ho:\n• "Delhi se Goa December me, 40k, 2 log"\n• "Koi garm jagah next month"\n• Ya HELP likho yeh dekhne ke liye ki main kya kar sakta hoon.`,
+    greetingWithTrip: (trip) => {
+      const d = trip.brief?.destination || "your trip";
+      if (trip.status === "BRIEF_CONFIRMED") {
+        return `Namaste! 👋 Aapka ${d} trip review ke liye ready hai. Free preview ke liye "yes" likho, ya bolo kya change karna hai.`;
+      }
+      if (trip.status === "PREVIEW_SENT") {
+        return `Namaste! 👋 Aapka ${d} preview bheja gaya. Payment link ke liye "pay" likho, ya bolo kya change karna hai.`;
+      }
+      if (trip.status === "PACKAGES_SENT") {
+        return `Namaste! 👋 Aapke 3 ${d} packages bheje. Pick karne ke liye "cheapest", "best value" ya "comfortable" likho.`;
+      }
+      if (trip.status === "ITINERARY_SENT") {
+        return `Namaste! 👋 Aapki ${d} itinerary ready hai. Naya trip plan karna hai? Bas batao kahan aur kab.`;
+      }
+      return `Namaste! 👋 Aapka ek trip chal raha hai. Bolo kya karna hai.`;
+    },
+    helpNudge: `Main help karne ke liye yahan hoon! 👋 Apne trip ke baare me batao — kahan jaana hai, kab, aur budget kitna hai.\n\nJaise:\n• "Delhi se Goa December me, 40k, 2 log"\n• "Koi garm jagah next month"\n\nYa HELP likho yeh dekhne ke liye ki main kya kar sakta hoon.`,
     sensitiveWarn: `Kripya is chat mein passport, card, Aadhaar ya OTP ki details mat bhejo. Maine ise save nahi kiya, aur mujhe iski zaroorat bhi nahi. Wo message is chat se delete kar do. Identity aur payment details aap sirf booking ke time secure page par daalte ho.`,
+  },
+  hi: {
+    newTripLimit: (n) =>
+      `आपके पास पहले से ${n} active trips हैं, यह limit है। नया trip शुरू करने से पहले एक को पूरा या cancel करें।`,
+    newTripStart: `ठीक है, नया trip plan करते हैं 👋\n\nकहाँ जाना चाहते हैं? (city या region)`,
+    briefReady: (s) => `बहुत बढ़िया! यह रहा आपका trip brief:\n\n${s}\n\nFree preview देखने के लिए "yes" लिखें।`,
+    briefUpdated: (s) => `Update हो गया। नया brief:\n\n${s}\n\nतैयार हों तो "yes" लिखें।`,
+    confirmNudge: `Free preview देखने के लिए "yes" लिखें, या बताएँ क्या बदलना है।`,
+    previewing: (d) => `ठीक है। ${d} का free preview बना रहा हूँ...`,
+    feeOffer: (amount, url) =>
+      `पसंद आया? One-time ₹${amount} में मैं 3 packages (all-in prices के साथ), दिन-ब-दिन itinerary भेजूँगा, और booking तक prices पर नज़र रखूँगा।\n\n💳 ₹${amount} pay करें (UPI / Card)\n👉 ${url}\n\nPayment के बाद packages यहीं अपने आप आ जाएँगे।\nअभी तैयार नहीं? बस "not now" लिखें।`,
+    payError: `Sorry, अभी payment link नहीं बन पाया। एक minute बाद "pay" लिखें।`,
+    notPaidYet: `अभी तक आपका payment नहीं मिला। अभी pay किया है तो एक minute रुक कर दोबारा "paid" लिखें। नया link चाहिए तो "pay" लिखें।`,
+    notNow: `कोई बात नहीं। आपका preview saved है। Packages चाहिए तो कभी भी "pay" लिखें, या बताएँ क्या बदलना है।`,
+    previewNudge: `Payment link के लिए "pay" लिखें, या बताएँ क्या बदलना है।`,
+    working: `अभी काम चल रहा है, थोड़ा रुकें...`,
+    searching: (d) => `Payment मिल गया। ${d} के लिए flights और hotels खोज रहा हूँ...`,
+    noFlightsPreview: (o, d, date) =>
+      `${o} से ${d} के लिए ${date} को मुझे कोई flight नहीं मिली, इसलिए मैंने payment नहीं माँगी।\n\nमैं सिर्फ flights + hotels plan करता हूँ। पास के शहरों के बीच train या cab आम तौर पर आसान होती है। कोई और city या date बताएँ, या "new trip" लिखें।`,
+    noFlights: (o, d, date) =>
+      `${o} से ${d} के लिए ${date} को मुझे कोई flight नहीं मिली।\n\nआपकी fee safe है और इसी trip के लिए valid रहेगी। कोई और city या date बताएँ, मैं बिना extra पैसे के दोबारा खोज दूँगा। Refund के लिए HELP लिखें।`,
+    packagesError: `Sorry, अभी packages नहीं ला पाया। आपकी fee safe है। एक minute बाद "yes" लिखें, मैं दोबारा कोशिश करूँगा।`,
+    checkError: `Sorry, अभी flights check नहीं कर पा रहा, इसलिए मैंने payment नहीं माँगी। एक minute बाद दोबारा "yes" लिखें।`,
+    paidNudge: `आपकी fee हो चुकी है। दोबारा खोजने के लिए "yes" लिखें, या बताएँ क्या बदलना है (city या dates)।`,
+    pickPrompt: (n) =>
+      `ये हैं आपके ${n} options।\n\n"cheapest", "best value" या "comfortable" लिखें, मैं itinerary बना दूँगा।`,
+    pickNudge: `चुनने के लिए "cheapest", "best value" या "comfortable" लिखें।`,
+    noOption: `यह option मेरे पास नहीं है। "cheapest", "best value" या "comfortable" try करें।`,
+    picked: (label) => `बढ़िया choice! आपने ${label} चुना।`,
+    building: (d) => `📍 ${d} की itinerary बना रहा हूँ...`,
+    itineraryError: `Sorry, अभी itinerary नहीं बन पाई। एक minute बाद अपना pick दोबारा भेजें।`,
+    itineraryEnd: `कुछ बदलना है? नया trip plan करने के लिए "new trip" लिखें।`,
+    llmDown: `Sorry, अभी आपका message समझने में दिक्कत हो रही है। एक minute बाद try करें।`,
+    laterDone: (d) =>
+      `${d} की itinerary भेज दी गई है 👋\n\nनया trip plan करना है? बस बताएँ कहाँ और कब, या "new trip" लिखें।`,
+    laterProgress: (d) =>
+      `आपका ${d} का trip चल रहा है 👋\n\nबताएँ क्या बदलना है, या "new trip" लिखें नए सिरे से शुरू करने के लिए।`,
+    intro: (withAsk) =>
+      `नमस्ते! मैं आपका AI travel planner हूँ 👋\n\n` +
+      `मैं आपका trip plan करूँगा: पहले free preview, फिर all-in prices के साथ 3 packages और दिन-ब-दिन itinerary।\n\n` +
+      `Planning का one-time ₹${FEE_INR} per trip लगता है, और पैसे देने से पहले आप free preview देखते हैं। कभी भी HELP लिखें, या STOP for messages बंद।` +
+      (process.env.TERMS_URL ? `\n\nआगे बढ़ने का मतलब है आप हमारी terms से सहमत हैं: ${process.env.TERMS_URL}` : "") +
+      (withAsk ? `\n\nकहाँ जाना चाहते हैं?` : ""),
+    greetingReply: `नमस्ते! 👋 मैं आपकी कैसे help कर सकता हूँ?\n\nमैं आपका AI travel planner हूँ। आप मुझे बता सकते हैं:\n• "Delhi से Goa December में, 40k, 2 लोग"\n• "कोई गर्म जगह next month"\n• या HELP लिखें यह देखने के लिए कि मैं क्या कर सकता हूँ।`,
+    greetingWithTrip: (trip) => {
+      const d = trip.brief?.destination || "your trip";
+      if (trip.status === "BRIEF_CONFIRMED") {
+        return `नमस्ते! 👋 आपका ${d} trip review के लिए ready है। Free preview के लिए "yes" लिखें, या बताएँ क्या बदलना है।`;
+      }
+      if (trip.status === "PREVIEW_SENT") {
+        return `नमस्ते! 👋 आपका ${d} preview भेजा गया। Payment link के लिए "pay" लिखें, या बताएँ क्या बदलना है।`;
+      }
+      if (trip.status === "PACKAGES_SENT") {
+        return `नमस्ते! 👋 आपके 3 ${d} packages भेजे। Pick करने के लिए "cheapest", "best value" या "comfortable" लिखें।`;
+      }
+      if (trip.status === "ITINERARY_SENT") {
+        return `नमस्ते! 👋 आपकी ${d} itinerary ready है। नया trip plan करना है? बस बताएँ कहाँ और कब।`;
+      }
+      return `नमस्ते! 👋 आपका एक trip चल रहा है। बताएँ क्या करना है।`;
+    },
+    helpNudge: `मैं help करने के लिए यहाँ हूँ! 👋 अपने trip के बारे में बताएँ — कहाँ जाना है, कब, और budget कितना है।\n\nजैसे:\n• "Delhi से Goa December में, 40k, 2 लोग"\n• "कोई गर्म जगह next month"\n\nया HELP लिखें।`,
+    sensitiveWarn: `कृपया इस chat में passport, card, Aadhaar या OTP की details न भेजें। मैंने इसे save नहीं किया, और मुझे इसकी ज़रूरत भी नहीं। वह message इस chat से delete कर दें। Identity और payment details आप सिर्फ booking के time secure page पर डालते हैं।`,
   },
 };
 
 function T(lang) {
-  return lang === "hinglish" || lang === "hi" ? TEXT.hinglish : TEXT.en;
+  if (lang === "hi") return TEXT.hi;
+  if (lang === "hinglish") return TEXT.hinglish;
+  return TEXT.en;
 }
 
+// 🔧 FIXED: skip empty drafts so they don't hijack the "latest trip" lookup
 function activeTripFilter(travelerId) {
-  return { travelerId, status: { $nin: TERMINAL_STATUSES } };
+  return {
+    travelerId,
+    status: { $nin: TERMINAL_STATUSES },
+    $or: [
+      { "brief.destination": { $exists: true, $ne: null } },
+      { status: { $ne: "DRAFT" } },
+    ],
+  };
 }
 
 // ─────────────────────────────────────────────────────────────
 export async function handleIncoming({ from, body }) {
-  const traveler = await upsertTraveler(from);
+  // 🛡️ Guard against empty/undefined bodies
+  if (!from || !body || !String(body).trim()) {
+    console.log("[handler] IGNORED empty inbound", { from, body });
+    return { reply: null, status: "IGNORED" };
+  }
 
-  // Remember the language the traveler writes in. Short replies like "3" give
-  // no signal (null), so the saved language stays.
+  // 🔍 Log EVERY inbound, before any early returns
+  console.log(`[handler] inbound from=${from} msg="${String(body).slice(0, 60)}"`);
+
+  const traveler = await upsertTraveler(from);
   const detected = detectLanguage(body);
-if (detected) {
-  traveler.language = detected;
-  await traveler.save();
-}
+  if (detected) {
+    traveler.language = detected;
+    await traveler.save();
+  }
   const lang = traveler.language || "en";
 
   const cmd = parseCommand(body);
 
-  // Opted out (STOP): stay silent, except START, which brings the traveler back
   if (traveler.optedOut && cmd !== "START") {
     await Message.create({ travelerId: traveler._id, direction: "in", body: redactSensitive(body) });
     return { reply: null, status: "OPTED_OUT" };
   }
 
-  // Passport, card, Aadhaar or OTP in chat: warn, do not process it, keep only a redacted copy.
-  // (Deleting the message from the traveler's chat needs the real WhatsApp API, Step 4.)
   if (detectSensitive(body).length > 0) {
     await Message.create({ travelerId: traveler._id, direction: "in", body: redactSensitive(body) });
     return say(null, traveler, from, T(lang).sensitiveWarn);
@@ -179,7 +288,7 @@ if (detected) {
 
   if (cmd) return handleCommand(cmd, traveler, from, lang);
 
-  // First message ever: say who we are and what it costs, record that it was shown, then carry on
+  // First message ever: intro (with AI disclosure + fee)
   if (!traveler.introduced) {
     const greetingOnly = GREETING_RE.test(body.trim());
     const introText = T(lang).intro(greetingOnly);
@@ -188,6 +297,21 @@ if (detected) {
     await traveler.save();
     await sendAndLog(from, traveler, null, introText);
     if (greetingOnly) return { reply: introText, status: "INTRO" };
+  }
+
+  // Greeting from an already-introduced traveler
+  if (GREETING_RE.test(body.trim())) {
+    // If there's an active trip, remind them of it instead of a generic reply
+    const activeTrip = await Trip.findOne(activeTripFilter(traveler._id)).sort({ updatedAt: -1 });
+    if (activeTrip && activeTrip.status !== "DRAFT") {
+      return say(activeTrip, traveler, from, T(lang).greetingWithTrip(activeTrip));
+    }
+    return say(null, traveler, from, T(lang).greetingReply);
+  }
+
+  // Gibberish / very short / no-meaning -> warm nudge
+  if (isGibberish(body)) {
+    return say(null, traveler, from, T(lang).helpNudge);
   }
 
   if (NEW_TRIP_RE.test(body.trim())) {
@@ -200,6 +324,12 @@ if (detected) {
     trip = await Trip.create({ travelerId: traveler._id, status: "DRAFT", brief: {} });
   }
 
+  // 🔍 Log trip context (fires only when we reach the trip-state switch)
+  console.log(
+    `[handler] trip=${trip._id} status=${trip.status} ` +
+    `dest=${trip.brief?.destination || "?"}`
+  );
+
   switch (trip.status) {
     case "DRAFT":
       return handleIntake(trip, traveler, from, body, lang);
@@ -209,15 +339,28 @@ if (detected) {
       return handlePreviewSent(trip, traveler, from, body, lang);
     case "PACKAGES_SENT":
       return handlePackagesSent(trip, traveler, from, body, lang);
-    case "FEE_PAID": // not used by this flow; kept so an old trip is not stuck
+    case "FEE_PAID":
       return sendPackages(trip, traveler, from, lang);
     default:
       return handleLaterStage(trip, traveler, from, body, lang);
   }
 }
 
-// Called by the payment route right after a payment is confirmed, so the
-// packages arrive without the traveler typing anything.
+// Helper: too short / no-meaning message?
+// Words that look short but are meaningful — don't treat as gibberish
+const KNOWN_SHORT = /^(hi|hey|yo|ok|okay|k|y|n|no|yes|to|from|se|ka|ki|ke|me|in|at|on|is|are|a|an|the|haan|nahi|na|hn|hmm|hm|go|goa|delhi|mumbai|pune|1|2|3|4|5|6|7|8|9|10)$/i;
+
+function isGibberish(text) {
+  const t = String(text || "").trim();
+  if (t.length === 0) return true;
+  if (/^\d+$/.test(t)) return false;              // any pure number is meaningful
+  if (KNOWN_SHORT.test(t)) return false;          // known short words
+  if (t.length <= 1) return true;                 // single letter that's not known
+  if (!/[aeiouAEIOU\u0900-\u097F0-9]/.test(t) && t.length <= 5) return true;
+  return false;
+}
+
+// Called by the payment route right after a payment is confirmed.
 export async function onPaymentConfirmed(tripId) {
   const trip = await Trip.findById(tripId);
   if (!trip || !trip.feePaid || trip.status !== "PREVIEW_SENT") return;
@@ -228,15 +371,17 @@ export async function onPaymentConfirmed(tripId) {
   await sendPackages(trip, traveler, traveler.phone, traveler.language || "en");
 }
 
-// ─────────────────────────────────────────────────────────────
 async function handleNewTrip(traveler, from, lang) {
   const tx = T(lang);
-  const activeCount = await Trip.countDocuments(activeTripFilter(traveler._id));
 
-  if (activeCount >= MAX_ACTIVE_TRIPS) {
-    const latest = await Trip.findOne(activeTripFilter(traveler._id)).sort({ updatedAt: -1 });
-    return say(latest, traveler, from, tx.newTripLimit(MAX_ACTIVE_TRIPS));
-  }
+  // Cancel any existing non-terminal trips so the new one becomes the sole "active" candidate
+  await Trip.updateMany(
+    {
+      travelerId: traveler._id,
+      status: { $nin: TERMINAL_STATUSES },
+    },
+    { $set: { status: "CANCELLED" } }
+  );
 
   const trip = await Trip.create({ travelerId: traveler._id, status: "DRAFT", brief: {} });
   return say(trip, traveler, from, tx.newTripStart);
@@ -249,7 +394,6 @@ async function handleIntake(trip, traveler, from, body, lang) {
   const extracted = await tryExtract(body, { expect, brief: trip.brief });
   if (!extracted) return say(trip, traveler, from, tx.llmDown);
 
-  // Regex backup: "X to Y" / "X se Y" pattern for origin/destination
   const routeMatch = body.match(/\b([A-Za-z]+)\s+(?:to|se)\s+([A-Za-z]+)\b/i);
   if (routeMatch) {
     const [, a, b] = routeMatch;
@@ -267,7 +411,7 @@ async function handleIntake(trip, traveler, from, body, lang) {
   }
 
   trip.brief = mergeBrief(trip.brief, extracted);
-  trip.brief._lastUserMessage = body; // context for askMissing
+  trip.brief._lastUserMessage = body;
   trip.markModified("brief");
 
   const missing = REQUIRED_FIELDS.filter((f) => !trip.brief[f]);
@@ -282,14 +426,12 @@ async function handleIntake(trip, traveler, from, body, lang) {
   return askNext(trip, traveler, from, lang);
 }
 
-// Ask for the next missing detail(s): a pair when they belong together.
 async function askNext(trip, traveler, from, lang) {
   const missing = REQUIRED_FIELDS.filter((f) => !trip.brief[f]);
   const fields = nextQuestionFields(missing);
 
   const question = await askMissing(fields, trip.brief, { language: lang });
 
-  // One field: its name. Two fields: "origin and destination" (read by the extractor as context).
   trip.brief._asked = fields.join(" and ");
   trip.markModified("brief");
   await trip.save();
@@ -318,7 +460,6 @@ async function handleBriefConfirmed(trip, traveler, from, body, lang) {
       return applyBriefEdit(trip, traveler, from, body, lang, extracted);
     }
 
-    // Nothing extracted: the rules could not read it, so ask the model what it means.
     const intent = await classify(body, {
       labels: ["yes", "change", "question", "other"],
       context:
@@ -338,8 +479,6 @@ async function handleBriefConfirmed(trip, traveler, from, body, lang) {
   return sendPreview(trip, traveler, from, lang);
 }
 
-// The traveler changed something in the brief (PRD section 5: a brief can be
-// edited at any time). The fee, if already paid, stays valid for the same trip.
 async function applyBriefEdit(trip, traveler, from, body, lang, extracted) {
   const tx = T(lang);
 
@@ -359,12 +498,9 @@ async function applyBriefEdit(trip, traveler, from, body, lang, extracted) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Free preview, then the fee link. No flight or hotel search yet.
 async function sendPreview(trip, traveler, from, lang) {
   const tx = T(lang);
 
-  // Already paid (the traveler changed the details after a search that found nothing):
-  // no preview and no second fee, search again straight away
   if (trip.feePaid) {
     trip.status = "PREVIEW_SENT";
     await trip.save();
@@ -373,8 +509,6 @@ async function sendPreview(trip, traveler, from, lang) {
 
   await sendAndLog(from, traveler, trip, tx.previewing(trip.brief.destination));
 
-  // Never ask for money for a trip that has no flights. The search is cached, so the
-  // packages after payment reuse it and this check costs nothing extra.
   const b = trip.brief;
   let flightsOk = true;
   try {
@@ -390,7 +524,6 @@ async function sendPreview(trip, traveler, from, lang) {
     if (String(err.message).startsWith("No flights")) {
       flightsOk = false;
     } else {
-      // Cannot verify (provider down): do not take a fee for something we could not check
       console.error("[preview] flight check failed:", err.message);
       return say(trip, traveler, from, tx.checkError);
     }
@@ -399,7 +532,6 @@ async function sendPreview(trip, traveler, from, lang) {
     return say(trip, traveler, from, tx.noFlightsPreview(b.origin, b.destination, b.departDate));
   }
 
-
   let preview = null;
   try {
     preview = await buildPreview(trip);
@@ -407,7 +539,6 @@ async function sendPreview(trip, traveler, from, lang) {
     console.error("[preview] failed:", err);
   }
 
-  // Saved before the link is created, so "pay" works even if the link step fails
   trip.status = "PREVIEW_SENT";
   await trip.save();
 
@@ -435,12 +566,10 @@ async function sendFeeLink(trip, traveler, from, lang) {
 async function handlePreviewSent(trip, traveler, from, body, lang) {
   const tx = T(lang);
 
-  // Fee already paid, but the packages have not gone out (still running, or the search found nothing)
   if (trip.feePaid) {
     if (busy.has(String(trip._id))) return say(trip, traveler, from, tx.working);
     if (isYes(body) || LINK_RE.test(body)) return sendPackages(trip, traveler, from, lang);
 
-    // The traveler may be changing the city or dates after a failed search
     const edit = await tryExtract(body, { brief: trip.brief });
     if (!edit) return say(trip, traveler, from, tx.llmDown);
     if (Object.keys(edit).length > 0) {
@@ -453,7 +582,6 @@ async function handlePreviewSent(trip, traveler, from, body, lang) {
   if (isYes(body) || LINK_RE.test(body)) return sendFeeLink(trip, traveler, from, lang);
   if (NOT_NOW_RE.test(body)) return say(trip, traveler, from, tx.notNow);
 
-  // A change to the brief?
   const extracted = await tryExtract(body, { brief: trip.brief });
   if (!extracted) return say(trip, traveler, from, tx.llmDown);
   if (Object.keys(extracted).length > 0) {
@@ -475,7 +603,6 @@ async function handlePreviewSent(trip, traveler, from, body, lang) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Packages: only after the fee is paid (this is where the paid searches start).
 async function sendPackages(trip, traveler, from, lang) {
   const tx = T(lang);
   const release = lock(trip._id);
@@ -500,7 +627,6 @@ async function sendPackages(trip, traveler, from, lang) {
       );
     }
 
-    // Save
     trip.packages = result.tiers.map((t) => ({
       tier: t.tier,
       label: t.label,
@@ -510,11 +636,16 @@ async function sendPackages(trip, traveler, from, lang) {
       reasoning: t.reasoning,
       drawback: t.drawback,
     }));
+
+    // F6: seed baseline so price watch has something to compare against.
+    if (result.tiers[0] && !trip.baselinePrice) {
+      trip.baselinePrice = result.tiers[0].totalPrice;
+    }
+
     trip.status = "PACKAGES_SENT";
     trip.markModified("packages");
     await trip.save();
 
-    // Over-budget warning (numbers-heavy, kept in English)
     const cheapest = result.tiers[0];
     if (cheapest && cheapest.overBudget) {
       const over = cheapest.totalPrice - trip.brief.budget;
@@ -530,7 +661,6 @@ async function sendPackages(trip, traveler, from, lang) {
       await sendAndLog(from, traveler, trip, warning);
     }
 
-    // Send each package
     const messages = [];
     for (const tier of result.tiers) {
       const text = formatPackageMessage(tier, trip.brief);
@@ -554,14 +684,12 @@ async function sendPackages(trip, traveler, from, lang) {
 }
 
 // ─────────────────────────────────────────────────────────────
-// The fee is already paid at this point. Picking a package builds the itinerary.
 async function handlePackagesSent(trip, traveler, from, body, lang) {
   const tx = T(lang);
 
   let picked = pickTier(body);
 
   if (!picked) {
-    // Rules could not read it ("sasta wala chahiye", "dusra le lo"): ask the model
     const intent = await classify(body, {
       labels: ["pick_cheapest", "pick_best_value", "pick_comfortable", "question", "other"],
       context:
@@ -583,6 +711,10 @@ async function handlePackagesSent(trip, traveler, from, body, lang) {
   if (!chosen) return say(trip, traveler, from, tx.noOption);
 
   trip.chosenTier = picked;
+
+  // F6: baseline price for price watch (PRD §6)
+  trip.baselinePrice = chosen.totalPrice;
+
   await trip.save();
 
   await sendAndLog(from, traveler, trip, tx.picked(chosen.label));
@@ -609,6 +741,13 @@ async function sendItinerary(trip, traveler, from, lang) {
     trip.itinerary = itinerary;
     trip.status = "ITINERARY_SENT";
     trip.markModified("itinerary");
+
+    // Generate share token if not already set
+    if (!trip.shareToken) {
+      trip.shareToken = crypto.randomBytes(16).toString("hex");
+      trip.shareEnabled = true;
+    }
+
     await trip.save();
 
     for (const day of itinerary.days) {
@@ -622,6 +761,14 @@ async function sendItinerary(trip, traveler, from, lang) {
       itinerary.documents
     );
     await sendAndLog(from, traveler, trip, summaryMsg);
+
+    // 📱 Send shareable itinerary link
+    const baseUrl = process.env.APP_BASE_URL || "http://localhost:3000";
+    if (trip.shareToken) {
+      const shareUrl = `${baseUrl}/itinerary/${trip._id}?t=${trip.shareToken}`;
+      await sendAndLog(from, traveler, trip, `📱 Save your full itinerary:\n${shareUrl}`);
+    }
+
     await sendAndLog(from, traveler, trip, tx.itineraryEnd);
 
     return {
@@ -641,7 +788,6 @@ async function handleLaterStage(trip, traveler, from, body, lang) {
   const dest = trip.brief?.destination || "your destination";
   const footer = trip.status === "ITINERARY_SENT" ? tx.laterDone(dest) : tx.laterProgress(dest);
 
-  // A question or a "thanks" gets a short answer first, then the footer
   const answer = await answerQuestion(body, { language: lang, destination: trip.brief?.destination });
   return say(trip, traveler, from, answer ? `${answer}\n\n${footer}` : footer);
 }
@@ -701,16 +847,13 @@ async function sendAndLog(from, traveler, trip, body) {
 async function handleCommand(cmd, traveler, from, lang) {
   const { text, log } = await runCommand(cmd, traveler, lang);
   if (!log) {
-    // DELETE MY DATA: the traveler's records are gone, so send without logging
     await wa.sendText(from, text);
     return { reply: text, status: "DELETED" };
   }
   return say(null, traveler, from, text);
 }
 
-// ── Sensitive data guard (PRD section 5 and 9) ───────────────
-// The bot never needs these. If one shows up it is not processed, and only a
-// redacted copy is stored.
+// ── Sensitive data guard ────────────────────────────────────
 
 const SENSITIVE_PATTERNS = [
   { kind: "otp", re: /\botp\b\D{0,15}\d{4,8}\b|\b\d{4,8}\b\D{0,15}\botp\b/i },
@@ -768,7 +911,6 @@ function redactSensitive(text) {
   return out;
 }
 
-// Send one message and return the standard result object.
 async function say(trip, traveler, from, text) {
   await sendAndLog(from, traveler, trip, text);
   return { reply: text, tripId: trip?._id, status: trip?.status };
